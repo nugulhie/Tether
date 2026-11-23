@@ -1,0 +1,7 @@
+[project]
+name = "company-agent-gateway-interceptor"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["grpcio>=1.66", "protobuf>=5.27", "httpx>=0.28", "PyJWT[crypto]>=2.8", "PyYAML>=6.0"]
+[tool.pytest.ini_options]
+pythonpath = ["."]

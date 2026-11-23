@@ -1,0 +1,5 @@
+# Policy and enforcement changes need security review. Replace the team with your own.
+/policies/                    @your-org/security-team
+/services/policy-compiler/    @your-org/security-team
+/.github/workflows/policy.yml @your-org/security-team
+/.github/CODEOWNERS           @your-org/security-team

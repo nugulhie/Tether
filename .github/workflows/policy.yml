@@ -1,0 +1,60 @@
+# GitOps policy pipeline.
+#   pull_request: validate every policy file (required status check on main).
+#   push to main: build a bundle, sign it with the Ed25519 key, publish to the Policy API.
+# Required secrets (in the `policy-publish` environment): POLICY_SIGNING_KEY (PEM),
+# POLICY_SIGNING_KEY_ID, POLICY_PUBLISHER_TOKEN, POLICY_API_URL.
+name: policy
+on:
+  pull_request:
+    paths: ["policies/**", "services/policy-compiler/**"]
+  push:
+    branches: [main]
+    paths: ["policies/**", "services/policy-compiler/**"]
+permissions:
+  contents: read
+concurrency:
+  group: policy-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install ./services/policy-compiler pytest
+      - run: company-policy validate policies
+      - run: cd services/policy-compiler && pytest -q tests
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: policy-publish
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install ./services/policy-compiler
+      - name: Build and sign bundle
+        env:
+          POLICY_SIGNING_KEY: ${{ secrets.POLICY_SIGNING_KEY }}
+          POLICY_SIGNING_KEY_ID: ${{ secrets.POLICY_SIGNING_KEY_ID }}
+        run: |
+          umask 077
+          printf '%s' "$POLICY_SIGNING_KEY" > "$RUNNER_TEMP/signing.pem"
+          # Commit count on main only grows (main is protected against force pushes),
+          # so it serves as the monotonically increasing bundle serial.
+          company-policy bundle policies \
+            --serial "$(git rev-list --count HEAD)" --commit "$GITHUB_SHA" \
+            --key "$RUNNER_TEMP/signing.pem" --key-id "$POLICY_SIGNING_KEY_ID" \
+            --out "$RUNNER_TEMP/bundle.json"
+          rm -f "$RUNNER_TEMP/signing.pem"
+      - name: Publish
+        env:
+          POLICY_API_URL: ${{ secrets.POLICY_API_URL }}
+          POLICY_PUBLISHER_TOKEN: ${{ secrets.POLICY_PUBLISHER_TOKEN }}
+        run: |
+          curl --fail-with-body -sS -X POST "$POLICY_API_URL/v1/policies/bundle" \
+            -H "Authorization: Bearer $POLICY_PUBLISHER_TOKEN" -H "Content-Type: application/json" \
+            --data-binary "@$RUNNER_TEMP/bundle.json"

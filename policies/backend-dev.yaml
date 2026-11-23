@@ -1,0 +1,45 @@
+# Company agent policy. Changes go through pull request review (see .github/CODEOWNERS);
+# CI validates every file and publishes a signed bundle from the main branch.
+#
+# Bump `version` whenever anything below changes. Only network_policies can be applied
+# to running sandboxes; filesystem/process/credential changes create new sandboxes.
+policy_id: backend-agent-dev
+version: 3
+priority: 0
+description: Default development policy for every repository.
+match:
+  repos: ["*"]            # normalized as host/owner/repo, e.g. github.com/co/repo
+  environments: [development, staging]
+  # groups: [backend]     # optional: OIDC group claim must contain one of these
+filesystem:
+  read_only: [/usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+  read_write: [/tmp, /dev/null]
+network:
+  allow: [github.com, api.github.com, pypi.org, registry.npmjs.org]
+network_binaries: [/usr/bin/git, /usr/local/bin/python, /usr/local/bin/node]
+process:
+  allow: [git, python, pytest, npm]
+  deny: [sudo, docker, kubectl]
+aws:
+  role: null  # e.g. arn:aws:iam::123456789012:role/AIAgentDevelopmentRole
+  duration_seconds: 3600
+github:
+  org: your-org          # REPLACE: agents may only clone/fetch/push within this GitHub organization
+  permissions: {contents: write, pull_requests: write, metadata: read}
+# Model access through the company LLM gateway (session token, company keys). Agents have
+# no other route to a model: provider hosts are not in network.allow.
+llm:
+  anthropic: {models: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]}
+  openai: {models: ["gpt-5*"]}
+  # Self-hosted models on company GPU servers, reached only through the LLM gateway.
+  # local: {models: ["company-coder-*"]}
+# Only agent_binaries may reach the LLM gateway. Local-LLM agent jobs need their binary here, e.g.
+# agent_binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/python, /usr/local/bin/company-local-agent]
+  max_requests_per_minute: 120
+# Prompt/response guardrails, enforced inline by the LLM gateway for every provider.
+# A guardrail error always denies the request (on_error: deny); only an administrator's
+# time-limited, audited bypass (POST /v1/admin/guardrails/bypass) lifts that.
+guardrails:
+  input: {secrets: true, pii: true, deny_patterns: []}
+  output: {secrets: true, pii: false}
+  on_error: deny

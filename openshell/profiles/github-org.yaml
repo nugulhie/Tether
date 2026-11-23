@@ -1,0 +1,32 @@
+# GitHub App installation token, usable only inside the company organization.
+# Never attach the stock `github` profile: its broad github.com rules are unioned with these
+# and would reopen every repository. REPLACE your-org (must equal policies' github.org).
+id: github-org
+display_name: GitHub (company organization only)
+category: source_control
+credentials:
+  - name: api_token
+    env_vars: [GITHUB_TOKEN, GH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: github.com
+    port: 443
+    path: /your-org/**
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: {method: GET, path: "/your-org/**"}
+      - allow: {method: POST, path: "/your-org/*/git-upload-pack"}
+      - allow: {method: POST, path: "/your-org/*/git-receive-pack"}
+  - host: api.github.com
+    port: 443
+    path: /repos/your-org/**
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: {method: GET, path: "/repos/your-org/**"}
+      - allow: {method: POST, path: "/repos/your-org/**"}
+      - allow: {method: PATCH, path: "/repos/your-org/**"}
+binaries: [/usr/bin/git, /usr/local/bin/git, /usr/bin/gh, /usr/local/bin/gh]

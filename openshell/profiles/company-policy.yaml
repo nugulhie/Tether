@@ -1,0 +1,21 @@
+# Session token for the Permission MCP. Bound to the Policy API's /v1/ paths only.
+# REPLACE policy-api.company.internal with your Policy API host.
+id: company-policy
+display_name: Company Policy API
+category: other
+credentials:
+  - name: session_token
+    env_vars: [COMPANY_SESSION_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: policy-api.company.internal
+    port: 443
+    path: /v1/**
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: {method: GET, path: "/v1/**"}
+      - allow: {method: POST, path: "/v1/**"}
+binaries: [/usr/local/bin/python, /usr/local/bin/node]

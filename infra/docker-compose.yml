@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: agent_security
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    ports: ["5432:5432"]
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_security"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  policy-api:
+    build:
+      context: ../services
+      dockerfile: policy-api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://agent:agent@postgres:5432/agent_security
+      # Local development only: accepts "dev:<user>" bearer tokens. Production uses
+      # AUTH_MODE=oidc with OIDC_ISSUER, OIDC_AUDIENCE and OIDC_JWKS_URL, and
+      # DEVICE_ID_HEADER set by the mTLS proxy in front of the API.
+      AUTH_MODE: dev
+      CREDENTIAL_BROKER_TOKEN: ${CREDENTIAL_BROKER_TOKEN:-dev-broker-token}
+      POLICY_PUBLISHER_TOKEN: ${POLICY_PUBLISHER_TOKEN:-dev-publisher-token}
+      SIEM_TOKEN: ${SIEM_TOKEN:-dev-siem-token}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:-dev-orchestrator-token}
+      LLM_GATEWAY_TOKEN: ${LLM_GATEWAY_TOKEN:-dev-gateway-token}
+      INTERCEPTOR_TOKEN: ${INTERCEPTOR_TOKEN:-dev-interceptor-token}
+      PLATFORM_LLM_GATEWAY_HOST: ${PLATFORM_LLM_GATEWAY_HOST:-}
+      PLATFORM_POLICY_API_HOST: ${PLATFORM_POLICY_API_HOST:-}
+      # GPU inference servers; policies that allow them in sandboxes are refused (ADR 0001).
+      PLATFORM_LOCAL_INFERENCE_HOSTS: ${PLATFORM_LOCAL_INFERENCE_HOSTS:-}
+      # Encrypts stored prompts and responses. Without it every model request is refused.
+      # Development key only: production supplies its own (Fernet, 32 url-safe base64 bytes).
+      CONTENT_ENCRYPTION_KEY: ${CONTENT_ENCRYPTION_KEY:-vXvXtOM1DdHbmIlnQHCOmvrFyKzEHqBZKd6MwuEdctY=}
+      GUARDRAIL_BYPASS_MAX_SECONDS: ${GUARDRAIL_BYPASS_MAX_SECONDS:-14400}
+      # Production: ADMIN_GROUPS, and DEVICE_ID_HEADER behind the mTLS proxy.
+      # Dev only: publish ../policies as an unsigned bundle on startup. Production loads
+      # signed bundles from CI and sets POLICY_BUNDLE_PUBLIC_KEY.
+      POLICY_DIR: /policies
+    volumes: ["../policies:/policies:ro"]
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  credential-broker:
+    build: ../services/credential-broker
+    environment:
+      POLICY_API: http://policy-api:8080
+      CREDENTIAL_BROKER_TOKEN: ${CREDENTIAL_BROKER_TOKEN:-dev-broker-token}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:-dev-orchestrator-token}
+      BROKER_DB: /data/broker.db
+      BROKER_ENCRYPTION_KEY: ${BROKER_ENCRYPTION_KEY:-}
+    volumes: [broker_data:/data]
+    ports: ["8081:8081"]
+    depends_on: [policy-api]
+  llm-gateway:
+    build: ../services/llm-gateway
+    environment:
+      POLICY_API: http://policy-api:8080
+      LLM_GATEWAY_TOKEN: ${LLM_GATEWAY_TOKEN:-dev-gateway-token}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Production: SANDBOX_EGRESS_CIDRS (the gateway egress proxy) and TRUSTED_PROXY_CIDRS.
+      LLM_GATEWAY_ALLOW_ANY_SOURCE: "1"
+      # Self-hosted inference (ADR 0001). Production: https + LOCAL_CLIENT_CERT/KEY and LOCAL_CA_BUNDLE.
+      LOCAL_UPSTREAM: ${LOCAL_UPSTREAM:-}
+      LOCAL_ALLOW_PLAINTEXT: ${LOCAL_ALLOW_PLAINTEXT:-}
+    ports: ["8082:8082"]
+    depends_on: [policy-api]
+  sandbox-orchestrator:
+    build: ../services/sandbox-orchestrator
+    environment:
+      POLICY_API: http://policy-api:8080
+      CREDENTIAL_BROKER: http://credential-broker:8081
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:-dev-orchestrator-token}
+      GITHUB_ORG: ${GITHUB_ORG:-your-org}
+      LLM_GATEWAY_URL: ${LLM_GATEWAY_URL:-https://llm-gateway.company.internal}
+      POLICY_API_PUBLIC_URL: ${POLICY_API_PUBLIC_URL:-https://policy-api.company.internal}
+      # The OpenShell CLI and the orchestrator's gateway identity (OPENSHELL_GATEWAY, mTLS or
+      # OIDC client credentials) must be provided to this container; developers never get them.
+      # Local-LLM agent jobs (ADR 0001): run due jobs every JOB_SCHEDULER_SECONDS when JOB_SCHEDULER=1.
+      JOB_SCHEDULER: ${JOB_SCHEDULER:-0}
+      LOCAL_AGENT_COMMAND: ${LOCAL_AGENT_COMMAND:-}
+    ports: ["8083:8083"]
+    depends_on: [policy-api, credential-broker]
+  gateway-interceptor:
+    build: ../services/gateway-interceptor
+    environment:
+      POLICY_API: http://policy-api:8080
+      INTERCEPTOR_TOKEN: ${INTERCEPTOR_TOKEN:-dev-interceptor-token}
+      PROFILES_DIR: /profiles
+      # Production: GATEWAY_ID + GATEWAY_EXTENSION_PUBLIC_KEY(_FILE), TLS_CERT_FILE/TLS_KEY_FILE,
+      # ALLOWED_SANDBOX_IMAGES, PLATFORM_ADMIN_ROLE. Local development only:
+      INTERCEPTOR_ALLOW_UNAUTHENTICATED: "1"
+    volumes: ["../openshell/profiles:/profiles:ro"]
+    ports: ["18081:18081"]
+    depends_on: [policy-api]
+volumes:
+  postgres_data:
+  broker_data:

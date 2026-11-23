@@ -1,0 +1,26 @@
+# Session token for the company LLM gateway. Bound to the gateway host only: the OpenShell
+# proxy substitutes the placeholder nowhere else (403 credential_endpoint_mismatch).
+# Import once per gateway (platform admin):  openshell profile import -f company-llm.yaml --global
+# REPLACE llm-gateway.company.internal with your gateway host (and set allowed_ips).
+id: company-llm
+display_name: Company LLM gateway
+category: inference
+credentials:
+  - name: anthropic_token
+    env_vars: [ANTHROPIC_AUTH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+  - name: openai_token
+    env_vars: [COMPANY_LLM_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: llm-gateway.company.internal
+    port: 443
+    path: /**
+    protocol: rest
+    enforcement: enforce
+    access: read-write
+binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node]

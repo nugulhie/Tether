@@ -1,0 +1,10 @@
+# Laptop control delivered by MDM. No Apple entitlements are needed.
+# Generate the deployable files with:  make mdm   (writes infra/mdm/out/)
+
+# Company LLM gateway. Claude Code on laptops and in sandboxes is pinned to it; the gateway only
+# serves sandbox egress, so on a laptop Claude Code cannot reach any model (personal logins included).
+llm_gateway_url: https://llm-gateway.company.internal          # REPLACE
+
+# Profile identifiers (reverse DNS of your organization).
+profile_prefix: com.company.agent-security                      # REPLACE
+organization: Company                                           # REPLACE
