@@ -27,7 +27,7 @@ GITHUB_HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version
 # Overridable in tests.
 sts_client = lambda: boto3.client("sts")  # noqa: E731
 iam_client = lambda: boto3.client("iam")  # noqa: E731
-REVOKE_POLICY = "CompanyAgentRevokedSessions"
+REVOKE_POLICY = "TetherRevokedSessions"
 http_transport = None
 
 

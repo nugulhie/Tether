@@ -2,7 +2,7 @@
 
 Invariant: a sandbox exists only if the Policy API issued its name to an active session, it
 runs exactly that session's compiled policy, and it has exactly that session's providers, all
-built from company-vended profiles. Nothing at the gateway can widen it afterwards.
+built from tether-vended profiles. Nothing at the gateway can widen it afterwards.
 
 This holds even for a caller with valid gateway credentials, including stolen orchestrator
 credentials, because the authority is the Policy API, not the caller.
@@ -15,9 +15,9 @@ from google.protobuf import json_format
 from . import convert
 
 # Provider instance name suffix -> the only profile it may use (mirrors the Policy API).
-PROVIDER_SUFFIX = {"llm": "company-llm", "policy": "company-policy", "github": "github-org", "aws": "company-aws"}
-SESSION_ANNOTATION = "company.agent-security/session-id"
-POLICY_HASH_ANNOTATION = "company.agent-security/policy-hash"
+PROVIDER_SUFFIX = {"llm": "tether-llm", "policy": "tether-policy", "github": "github-org", "aws": "tether-aws"}
+SESSION_ANNOTATION = "tether/session-id"
+POLICY_HASH_ANNOTATION = "tether/policy-hash"
 
 Authorize = Callable[[str], Awaitable[dict | None]]
 

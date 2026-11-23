@@ -6,7 +6,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-engine = create_engine(os.getenv("DATABASE_URL", "postgresql+psycopg://agent:agent@localhost:5432/agent_security"), pool_pre_ping=True)
+engine = create_engine(os.getenv("DATABASE_URL", "postgresql+psycopg://agent:agent@localhost:5432/tether"), pool_pre_ping=True)
 Session = sessionmaker(bind=engine)
 
 

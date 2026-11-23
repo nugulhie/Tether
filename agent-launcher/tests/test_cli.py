@@ -8,7 +8,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-import company_agent.cli as cli
+import tether_launcher.cli as cli
 
 LAUNCH = {"session_id": "sid-1", "sandbox_name": "agent-kim-abc-def", "policy_version": 3, "ticket": "T1", "attach_path": "/v1/attach"}
 
@@ -38,7 +38,7 @@ class World:
         monkeypatch.setattr(cli, "HOME", tmp_path)
         monkeypatch.setattr(cli, "TOKEN_FILE", tmp_path / "token.json")
         monkeypatch.setattr(cli, "MANAGED_CONFIG", tmp_path / "no-managed-config.json")
-        monkeypatch.setenv("COMPANY_AGENT_TOKEN", "dev:kim")
+        monkeypatch.setenv("TETHER_TOKEN", "dev:kim")
         monkeypatch.setattr(cli, "http", lambda timeout=10: httpx.Client(transport=httpx.MockTransport(self.handle)))
         monkeypatch.setattr(cli, "ws_connect", lambda url: (self.ws_urls.append(url), self.ws)[1])
         monkeypatch.setattr(cli.subprocess, "check_output", lambda *a, **k: "/src/repo\n")
@@ -130,7 +130,7 @@ def test_token_file_is_private(monkeypatch, tmp_path):
 
 
 def test_expired_token_without_refresh_asks_login(monkeypatch, tmp_path):
-    monkeypatch.delenv("COMPANY_AGENT_TOKEN", raising=False)
+    monkeypatch.delenv("TETHER_TOKEN", raising=False)
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "TOKEN_FILE", tmp_path / "token.json")
     monkeypatch.setattr(cli, "MANAGED_CONFIG", tmp_path / "none.json")
@@ -150,11 +150,11 @@ class TestManagedConfig:
         return cfg
 
     def test_overrides_environment(self, managed, monkeypatch):
-        monkeypatch.setenv("COMPANY_ORCHESTRATOR", "http://evil.example")
+        monkeypatch.setenv("TETHER_ORCHESTRATOR", "http://evil.example")
         assert cli.setting("orchestrator") == "https://agents.company.internal"
 
     def test_dev_token_env_ignored(self, managed, monkeypatch, tmp_path):
-        monkeypatch.setenv("COMPANY_AGENT_TOKEN", "dev:kim")
+        monkeypatch.setenv("TETHER_TOKEN", "dev:kim")
         monkeypatch.setattr(cli, "TOKEN_FILE", tmp_path / "missing.json")
         with pytest.raises(cli.click.ClickException, match="not logged in"):
             cli.load_token()

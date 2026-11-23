@@ -10,7 +10,7 @@ import app.main as m
 
 client = TestClient(m.app)
 USER = {"Authorization": "Bearer dev:Kim.Dev"}
-ADMIN = {"Authorization": "Bearer dev:secops:agent-security-admins"}
+ADMIN = {"Authorization": "Bearer dev:secops:tether-admins"}
 GATEWAY = {"Authorization": "Bearer gateway-secret"}
 KEY = Fernet.generate_key().decode()
 

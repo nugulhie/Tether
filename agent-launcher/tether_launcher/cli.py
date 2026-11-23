@@ -1,11 +1,11 @@
 import base64,json,os,signal,ssl,subprocess,sys,threading,time,click,httpx
 from pathlib import Path
-HOME=Path.home()/".company-agent"; TOKEN_FILE=HOME/"token.json"
+HOME=Path.home()/".tether"; TOKEN_FILE=HOME/"token.json"
 # Deployed by MDM. When present it is authoritative: environment overrides are ignored so a
 # user cannot point the signed launcher at a different orchestrator.
-MANAGED_CONFIG=Path("/Library/Application Support/CompanyAgent/config.json"); MANAGED_OWNER_UID=0
-ENV_KEYS={"orchestrator":"COMPANY_ORCHESTRATOR","device_id":"COMPANY_DEVICE_ID","oidc_issuer":"COMPANY_OIDC_ISSUER",
-          "oidc_client_id":"COMPANY_OIDC_CLIENT_ID","client_cert":"COMPANY_CLIENT_CERT","client_key":"COMPANY_CLIENT_KEY"}
+MANAGED_CONFIG=Path("/Library/Application Support/Tether/config.json"); MANAGED_OWNER_UID=0
+ENV_KEYS={"orchestrator":"TETHER_ORCHESTRATOR","device_id":"TETHER_DEVICE_ID","oidc_issuer":"TETHER_OIDC_ISSUER",
+          "oidc_client_id":"TETHER_OIDC_CLIENT_ID","client_cert":"TETHER_CLIENT_CERT","client_key":"TETHER_CLIENT_KEY"}
 DEFAULTS={"orchestrator":"http://localhost:8083","device_id":"local-dev"}
 
 def managed_config():
@@ -30,7 +30,7 @@ def http(timeout=10):
 
 def oidc_config():
     issuer=setting("oidc_issuer"); client_id=setting("oidc_client_id")
-    if not (issuer and client_id): raise click.ClickException("set COMPANY_OIDC_ISSUER and COMPANY_OIDC_CLIENT_ID")
+    if not (issuer and client_id): raise click.ClickException("set TETHER_OIDC_ISSUER and TETHER_OIDC_CLIENT_ID")
     with http() as c: d=c.get(issuer.rstrip("/")+"/.well-known/openid-configuration").raise_for_status().json()
     return client_id,d
 
@@ -47,14 +47,14 @@ def save_token(t):
     os.chmod(TOKEN_FILE,0o600)  # O_CREAT mode does not apply to an existing file
 
 def load_token():
-    if os.getenv("COMPANY_AGENT_TOKEN") and managed_config() is None: return os.environ["COMPANY_AGENT_TOKEN"]
-    if not TOKEN_FILE.exists(): raise click.ClickException("not logged in: run `company-agent login`")
+    if os.getenv("TETHER_TOKEN") and managed_config() is None: return os.environ["TETHER_TOKEN"]
+    if not TOKEN_FILE.exists(): raise click.ClickException("not logged in: run `tether login`")
     t=json.loads(TOKEN_FILE.read_text())
     if t["expires_at"]-60>time.time(): return t["id_token"]
-    if not t.get("refresh_token"): raise click.ClickException("login expired: run `company-agent login`")
+    if not t.get("refresh_token"): raise click.ClickException("login expired: run `tether login`")
     client_id,d=oidc_config()
     with http() as c: r=c.post(d["token_endpoint"],data={"grant_type":"refresh_token","refresh_token":t["refresh_token"],"client_id":client_id})
-    if r.status_code!=200 or "id_token" not in r.json(): raise click.ClickException("login expired: run `company-agent login`")
+    if r.status_code!=200 or "id_token" not in r.json(): raise click.ClickException("login expired: run `tether login`")
     # Keep the old refresh token if the IdP does not rotate it.
     new=r.json(); new.setdefault("refresh_token",t["refresh_token"]); save_token(new); return new["id_token"]
 
@@ -85,7 +85,7 @@ def login():
 
 def git_remote():
     try: subprocess.check_output(["git","rev-parse","--show-toplevel"],text=True,stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError,FileNotFoundError): raise click.ClickException("run company-agent inside a Git repository")
+    except (subprocess.CalledProcessError,FileNotFoundError): raise click.ClickException("run tether inside a Git repository")
     remote=subprocess.run(["git","remote","get-url","origin"],text=True,capture_output=True).stdout.strip()
     if not remote: raise click.ClickException("the repository has no origin remote; agents work on the company GitHub copy")
     return remote
@@ -146,18 +146,18 @@ def attach(launch):
                 ctl=json.loads(msg)
                 if ctl.get("type")=="exit": code=int(ctl.get("code",1))
     except Exception as e:  # dropped connection, revoked session, orchestrator restart
-        if code is None: click.echo(f"\r\n[company-agent] connection lost: {e}",err=True)
+        if code is None: click.echo(f"\r\n[tether] connection lost: {e}",err=True)
     finally:
         if saved is not None:
             import termios
             termios.tcsetattr(stdin,termios.TCSADRAIN,saved)
         ws.close()
-    if code is None: click.echo("\r\n[company-agent] session ended by the server",err=True)
+    if code is None: click.echo("\r\n[tether] session ended by the server",err=True)
     return 1 if code is None else code
 
 def run(agent,environment):
     launch=request_launch(agent,environment,load_token())
-    click.echo(f"[company-agent] sandbox {launch['sandbox_name']} (policy v{launch['policy_version']})",err=True)
+    click.echo(f"[tether] sandbox {launch['sandbox_name']} (policy v{launch['policy_version']})",err=True)
     return attach(launch)
 
 @cli.command()

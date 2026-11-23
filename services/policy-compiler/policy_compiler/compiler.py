@@ -205,9 +205,9 @@ def compile_policy(p, workspace=DEFAULT_WORKSPACE, platform=None):
             endpoint["rules"] = _github_rules(h, org)
         else:
             endpoint["access"] = access
-        rules[f"company_{i}"] = {"name": f"company-{h}", "endpoints": [endpoint], "binaries": bins}
+        rules[f"tether_{i}"] = {"name": f"tether-{h}", "endpoints": [endpoint], "binaries": bins}
     agent_bins = [{"path": x} for x in p.get("agent_binaries", DEFAULT_AGENT_BINARIES)]
-    for key, host, path in (("llm_gateway_host", "company_llm_gateway", None), ("policy_api_host", "company_policy_api", "/v1/**")):
+    for key, host, path in (("llm_gateway_host", "tether_llm_gateway", None), ("policy_api_host", "tether_policy_api", "/v1/**")):
         target = (platform or {}).get(key)
         if target:
             endpoint = {"host": target, "port": 443, "protocol": "rest", "enforcement": "enforce"}

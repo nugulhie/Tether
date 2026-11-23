@@ -21,7 +21,7 @@ class JobWorld(World):
         job = {**JOB, "repo": repo or JOB["repo"], "trigger": trigger, "triggered_by": user if trigger == "manual" else "schedule"}
         super().__init__(monkeypatch, tmp_path, session={**BASE_SESSION, "user_id": user if trigger == "manual" else "job:job-1",
                                                          "sandbox_name": "agent-job-job-1-abc-def", "job": job,
-                                                         "providers": {"agent-job-job-1-abc-def-llm": "company-llm",
+                                                         "providers": {"agent-job-job-1-abc-def-llm": "tether-llm",
                                                                        "agent-job-job-1-abc-def-github": "github-org"}})
         self.ended, self.due, self.credential_auth = [], [{"id": "job-1", "name": "nightly-deps"}], []
         monkeypatch.setenv("POLICY_API_PUBLIC_URL", "https://policy.company.internal")
@@ -67,12 +67,12 @@ def test_manual_run_executes_the_approved_task_and_tears_down(monkeypatch, tmp_p
     # Credentials for job sessions are requested with the orchestrator's identity (no person behind schedules).
     assert w.credential_auth == [ORCH]
     run = w.agent_runs()[-1]
-    assert "--no-tty" in run and run[-1] == "company-local-agent"
+    assert "--no-tty" in run and run[-1] == "tether-agent"
     envs = dict(run[i + 1].split("=", 1) for i, a in enumerate(run) if a == "--env")
     assert envs["OPENAI_BASE_URL"] == "https://llm.company.internal/local/v1"
-    assert envs["COMPANY_AGENT_MODEL"] == "company-coder-32b" and envs["COMPANY_AGENT_JOB"] == "job-1"
+    assert envs["TETHER_MODEL"] == "company-coder-32b" and envs["TETHER_JOB"] == "job-1"
     # The task reaches the sandbox through stdin into a file; only the file's path is in argv.
-    assert envs["COMPANY_AGENT_TASK_FILE"] == o.TASK_FILE and "COMPANY_AGENT_TASK" not in envs
+    assert envs["TETHER_TASK_FILE"] == o.TASK_FILE and "TETHER_TASK" not in envs
     [write] = w.task_writes()
     assert write["stdin"] == JOB["task"] and write["argv"][-1] == o.TASK_FILE and "--env" not in write["argv"]
     execs = [c["argv"] for c in w.execs()]

@@ -8,8 +8,8 @@ Takes the user's OIDC token, plus the device certificate via the mTLS proxy and 
 2. Creates the session at the Policy API, presenting the user's token. The session token comes back only here.
 3. Gets AWS/GitHub credentials from the broker with the user's token.
 4. Creates or updates providers from the company profiles (secrets via environment, never argv):
-   - `company-llm`: session token bound to the LLM gateway;
-   - `company-policy`: session token bound to the Policy API `/v1/**`;
+   - `tether-llm`: session token bound to the LLM gateway;
+   - `tether-policy`: session token bound to the Policy API `/v1/**`;
    - `github-org`: token bound to org paths;
    - `aws`.
 5. On a new sandbox: creates it with the compiled policy, then clones the repository inside it. On reuse: refreshes providers and applies network policy live (`openshell policy set --wait`).
@@ -33,7 +33,7 @@ Partial failures return 502 with details.
 Local agents run only as jobs an administrator approved at the Policy API (`/v1/agent/jobs`, `/v1/admin/agent/jobs/{id}/approve`).
 - `POST /v1/jobs/{id}/run`: a person runs a job (its owner or an administrator; the Policy API decides).
 - Schedule: with `JOB_SCHEDULER=1` the orchestrator asks `GET /v1/agent/jobs/due` every `JOB_SCHEDULER_SECONDS` (60) and starts those. The Policy API enforces the interval and one run per job at a time, so these credentials cannot run a job more often than approved.
-- A run creates the job's own sandbox (never a developer's), gets credentials from the broker with the orchestrator identity (a scheduled run has no person), and executes `LOCAL_AGENT_COMMAND` (JSON list, default `["company-local-agent"]`) non-interactively with `OPENAI_BASE_URL=<gateway>/local/v1`, `COMPANY_AGENT_MODEL`, `COMPANY_AGENT_TASK_FILE` and `COMPANY_AGENT_JOB`. The task text is written to `/workspace/.company-agent-task` through stdin of a separate exec first, so it never appears in argv or process listings. The agent is `local-agent/` (image: `infra/sandbox-images/local-agent`); it authenticates with the `company-llm` provider placeholder in `COMPANY_LLM_TOKEN`.
+- A run creates the job's own sandbox (never a developer's), gets credentials from the broker with the orchestrator identity (a scheduled run has no person), and executes `LOCAL_AGENT_COMMAND` (JSON list, default `["tether-agent"]`) non-interactively with `OPENAI_BASE_URL=<gateway>/local/v1`, `TETHER_MODEL`, `TETHER_TASK_FILE` and `TETHER_JOB`. The task text is written to `/workspace/.tether-task` through stdin of a separate exec first, so it never appears in argv or process listings. The agent is `local-agent/` (image: `infra/sandbox-images/local-agent`); it authenticates with the `tether-llm` provider placeholder in `TETHER_LLM_TOKEN`.
 - Each run is bounded by the job's `max_runtime_seconds`. Afterwards the sandbox is deleted and the session ended. `agent.exit` records the return code, timeout, job and trigger.
 - `POST /v1/admin/revoke` accepts `job_id`.
 - The agent binary must be listed in the policy's `agent_binaries`, or OpenShell will not let it reach the LLM gateway.

@@ -2,13 +2,13 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: agent_security
+      POSTGRES_DB: tether
       POSTGRES_USER: agent
       POSTGRES_PASSWORD: agent
     ports: ["5432:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agent -d agent_security"]
+      test: ["CMD-SHELL", "pg_isready -U agent -d tether"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -17,7 +17,7 @@ services:
       context: ../services
       dockerfile: policy-api/Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://agent:agent@postgres:5432/agent_security
+      DATABASE_URL: postgresql+psycopg://agent:agent@postgres:5432/tether
       # Local development only: accepts "dev:<user>" bearer tokens. Production uses
       # AUTH_MODE=oidc with OIDC_ISSUER, OIDC_AUDIENCE and OIDC_JWKS_URL, and
       # DEVICE_ID_HEADER set by the mTLS proxy in front of the API.

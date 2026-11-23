@@ -2,10 +2,10 @@
 
 The orchestrator runs this inside the job's OpenShell sandbox with cwd = the cloned repository and:
   OPENAI_BASE_URL          <llm-gateway>/local/v1 (OpenAI-compatible chat/completions)
-  COMPANY_AGENT_MODEL      model id (the policy's llm.local.models must allow it)
-  COMPANY_AGENT_TASK_FILE  file holding the approved task (COMPANY_AGENT_TASK is a fallback)
-  COMPANY_AGENT_JOB        job id, for logs
-  COMPANY_LLM_TOKEN        an OpenShell placeholder from the `company-llm` provider. The sandbox
+  TETHER_MODEL      model id (the policy's llm.local.models must allow it)
+  TETHER_TASK_FILE  file holding the approved task (TETHER_TASK is a fallback)
+  TETHER_JOB        job id, for logs
+  TETHER_LLM_TOKEN        an OpenShell placeholder from the `tether-llm` provider. The sandbox
                            proxy swaps in the session token only on requests to the gateway host,
                            so the real token never exists in this process.
 
@@ -66,34 +66,34 @@ def bounded(environ, name: str, default, lo, hi, cast=int):
 
 def load_config(environ) -> dict:
     base = environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
-    model = environ.get("COMPANY_AGENT_MODEL", "").strip()
-    token = environ.get("COMPANY_LLM_TOKEN", "").strip()
+    model = environ.get("TETHER_MODEL", "").strip()
+    token = environ.get("TETHER_LLM_TOKEN", "").strip()
     if not base:
         raise ConfigError("OPENAI_BASE_URL is not set")
     if not model:
-        raise ConfigError("COMPANY_AGENT_MODEL is not set")
+        raise ConfigError("TETHER_MODEL is not set")
     if not token:
-        raise ConfigError("COMPANY_LLM_TOKEN is not set: the sandbox has no company-llm provider attached")
-    task_file = environ.get("COMPANY_AGENT_TASK_FILE", "").strip()
+        raise ConfigError("TETHER_LLM_TOKEN is not set: the sandbox has no tether-llm provider attached")
+    task_file = environ.get("TETHER_TASK_FILE", "").strip()
     if task_file:
         try:
             with open(task_file, "rb") as f:
                 raw = f.read(MAX_TASK_BYTES + 1)
         except OSError as e:
-            raise ConfigError(f"cannot read COMPANY_AGENT_TASK_FILE: {e.strerror}")
+            raise ConfigError(f"cannot read TETHER_TASK_FILE: {e.strerror}")
         if len(raw) > MAX_TASK_BYTES:
             raise ConfigError(f"task file exceeds {MAX_TASK_BYTES} bytes")
         task = raw.decode("utf-8", errors="replace").strip()
     else:
-        task = environ.get("COMPANY_AGENT_TASK", "").strip()
+        task = environ.get("TETHER_TASK", "").strip()
     if not task:
-        raise ConfigError("no task: set COMPANY_AGENT_TASK_FILE (or COMPANY_AGENT_TASK)")
+        raise ConfigError("no task: set TETHER_TASK_FILE (or TETHER_TASK)")
     return {
-        "url": f"{base}/chat/completions", "model": model, "token": token, "task": task, "job": environ.get("COMPANY_AGENT_JOB", ""),
-        "max_steps": bounded(environ, "COMPANY_AGENT_MAX_STEPS", 40, 1, 500),
-        "max_output": bounded(environ, "COMPANY_AGENT_MAX_OUTPUT_BYTES", 32 * 1024, 1024, 1024 * 1024),
-        "shell_timeout": bounded(environ, "COMPANY_AGENT_SHELL_TIMEOUT", 300.0, 1, 3600, float),
-        "http_timeout": bounded(environ, "COMPANY_AGENT_HTTP_TIMEOUT", 600.0, 5, 3600, float),
+        "url": f"{base}/chat/completions", "model": model, "token": token, "task": task, "job": environ.get("TETHER_JOB", ""),
+        "max_steps": bounded(environ, "TETHER_MAX_STEPS", 40, 1, 500),
+        "max_output": bounded(environ, "TETHER_MAX_OUTPUT_BYTES", 32 * 1024, 1024, 1024 * 1024),
+        "shell_timeout": bounded(environ, "TETHER_SHELL_TIMEOUT", 300.0, 1, 3600, float),
+        "http_timeout": bounded(environ, "TETHER_HTTP_TIMEOUT", 600.0, 5, 3600, float),
     }
 
 
@@ -205,7 +205,7 @@ def main(environ=None, transport: httpx.BaseTransport | None = None, sleep=time.
         verify = tls_verify(environ)
     except ConfigError as e:
         log("error", reason="config", message=str(e))
-        print(f"company-local-agent: {e}", file=sys.stderr)
+        print(f"tether-agent: {e}", file=sys.stderr)
         return EXIT_CONFIG
     tools = Tools(workdir or os.getcwd(), cfg["max_output"], cfg["shell_timeout"])
     log("start", job=cfg["job"], model=cfg["model"], max_steps=cfg["max_steps"])
@@ -214,7 +214,7 @@ def main(environ=None, transport: httpx.BaseTransport | None = None, sleep=time.
             return loop(cfg, tools, client, sleep)
     except Stop as e:
         log("error", reason="exit", code=e.code, message=str(e))
-        print(f"company-local-agent: {e}", file=sys.stderr)
+        print(f"tether-agent: {e}", file=sys.stderr)
         return e.code
 
 

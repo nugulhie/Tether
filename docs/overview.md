@@ -1,4 +1,4 @@
-# Company AI Agent Security Platform: 개발 현황 및 동작 개요
+# Tether: 개발 현황 및 동작 개요
 
 > 작성일: 2026-10-02
 >
@@ -38,7 +38,7 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 ```text
  개발자 Mac                         컨트롤 플레인 (회사 서버)                         데이터 플레인 (관리형 OpenShell gateway)
 ┌──────────────────┐   launch    ┌──────────────────────┐  세션(사용자 토큰)   ┌────────────┐
-│ company-agent    │────────────►│ Sandbox Orchestrator │────────────────────►│ Policy API │◄─── CI (서명된 정책 번들)
+│ tether    │────────────►│ Sandbox Orchestrator │────────────────────►│ Policy API │◄─── CI (서명된 정책 번들)
 │ (터미널 클라이언트) │◄═══WS/PTY══►│ (gateway 자격 유일 보유) │  자격증명            └─────┬──────┘
 └──────────────────┘             │                      │────────────────────►┌──────────────┐
 ┌──────────────────┐             │                      │                     │ Credential   │──► AWS STS / GitHub App
@@ -120,7 +120,7 @@ sequenceDiagram
     participant CI as CI (policy.yml)
     participant API as Policy API
     Dev->>GH: policies/*.yaml 변경 PR (version 증가)
-    GH->>CI: PR → company-policy validate + 테스트
+    GH->>CI: PR → tether-policy validate + 테스트
     Note over GH: CODEOWNERS(보안팀) 리뷰 필수
     GH->>CI: main 머지
     CI->>CI: 번들 생성 (serial = main 커밋 수) + Ed25519 서명
@@ -133,7 +133,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant U as 개발자 (company-agent)
+    participant U as 개발자 (tether)
     participant O as Orchestrator
     participant P as Policy API
     participant B as Broker
@@ -284,7 +284,7 @@ sequenceDiagram
 - **인프라:** 원격 OpenShell gateway(K8s), 고정 IP egress 프록시, mTLS 프록시와 기기 인증서, interceptor TLS와 gateway 공개키, SIEM 연동
 - **자리표시자 교체:** `your-org`, 내부 호스트명, `infra/mdm/config.yaml`(게이트웨이 URL, 프로필 접두사)
 - **새로 만들 것:**
-  - `company-aws` 프로필(SigV4 재서명). 그 전까지 AWS 권한은 차단 쪽으로 동작합니다.
+  - `tether-aws` 프로필(SigV4 재서명). 그 전까지 AWS 권한은 차단 쪽으로 동작합니다.
   - 샌드박스 이미지: Claude Code 관리 설정(`allowedProviders: ["customEndpoint"]`), Codex 게이트웨이 설정, git 인증 설정
 - **MDM:** 시범 Mac 검증 후 Claude Code 프로필과 런처 pkg 배포
 - **GitHub:** 브랜치 보호, CODEOWNERS 팀 지정, CI 시크릿, GitHub App 생성과 설치
@@ -301,8 +301,8 @@ make mdm                               # 노트북·샌드박스 Claude Code 관
 cd infra && docker compose up --build  # postgres + 서비스 6개 (AUTH_MODE=dev)
 
 make launcher
-export COMPANY_AGENT_TOKEN=dev:$USER COMPANY_ORCHESTRATOR=http://localhost:8083
-company-agent claude                   # 회사 org 레포 안에서 실행 (오케스트레이터에 OpenShell CLI와 gateway 자격 필요)
+export TETHER_TOKEN=dev:$USER TETHER_ORCHESTRATOR=http://localhost:8083
+tether claude                   # 회사 org 레포 안에서 실행 (오케스트레이터에 OpenShell CLI와 gateway 자격 필요)
 ```
 
 | 포트 | 서비스 |

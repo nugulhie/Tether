@@ -14,8 +14,8 @@ USER = {"Authorization": "Bearer dev:kim"}
 BASE_SESSION = {"session_id": "sid-1", "session_token": "ast_SECRET_SESSION", "user_id": "kim", "device_id": "mac-1",
                 "sandbox_name": "agent-kim-abc-def", "policy_version": 3, "openshell_policy": {"version": 1, "network_policies": {}},
                 "policy": {"github": {"org": "acme", "permissions": {"contents": "write"}}, "aws": {"role": "arn:aws:iam::123456789012:role/R"}},
-                "providers": {"agent-kim-abc-def-llm": "company-llm", "agent-kim-abc-def-policy": "company-policy",
-                              "agent-kim-abc-def-aws": "company-aws", "agent-kim-abc-def-github": "github-org"}}
+                "providers": {"agent-kim-abc-def-llm": "tether-llm", "agent-kim-abc-def-policy": "tether-policy",
+                              "agent-kim-abc-def-aws": "tether-aws", "agent-kim-abc-def-github": "github-org"}}
 
 
 class World:
@@ -83,15 +83,15 @@ def test_launch_creates_sandbox_with_bound_providers(monkeypatch, tmp_path):
     calls = w.calls()
     creates = {c["argv"][c["argv"].index("--name") + 1]: c for c in calls if c["argv"][:2] == ["provider", "create"]}
     assert {n: c["argv"][c["argv"].index("--type") + 1] for n, c in creates.items()} == {
-        "agent-kim-abc-def-llm": "company-llm", "agent-kim-abc-def-policy": "company-policy",
-        "agent-kim-abc-def-aws": "company-aws", "agent-kim-abc-def-github": "github-org"}
+        "agent-kim-abc-def-llm": "tether-llm", "agent-kim-abc-def-policy": "tether-policy",
+        "agent-kim-abc-def-aws": "tether-aws", "agent-kim-abc-def-github": "github-org"}
     assert creates["agent-kim-abc-def-llm"]["env"]["ANTHROPIC_AUTH_TOKEN"] == "ast_SECRET_SESSION"
     assert creates["agent-kim-abc-def-github"]["env"]["GITHUB_TOKEN"] == "ghs_SECRET"
     argv_text = json.dumps([c["argv"] for c in calls])
     for secret in ("ast_SECRET_SESSION", "ghs_SECRET", "AWSVALUE-9x"):
         assert secret not in argv_text
     sandbox = next(c["argv"] for c in calls if c["argv"][:2] == ["sandbox", "create"])
-    assert sandbox.count("--provider") == 4 and "managed-by=company-orchestrator" in sandbox
+    assert sandbox.count("--provider") == 4 and "managed-by=tether-orchestrator" in sandbox
     clone = next(c["argv"] for c in calls if "clone" in c["argv"])
     assert clone[-2:] == ["https://github.com/acme/payments.git", "/workspace/payments"]
     assert [a["event_type"] for a in w.audits] == ["sandbox.create"]

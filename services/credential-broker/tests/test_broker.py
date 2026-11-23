@@ -242,7 +242,7 @@ def test_revoke_denies_aws_session_and_revokes_github_token(env, monkeypatch):
     stub = iam(monkeypatch)
     captured = {}
     stub.client.meta.events.register("provide-client-params.iam.PutRolePolicy", lambda params, **_: captured.update(params))
-    stub.add_response("put_role_policy", {}, {"RoleName": "AIAgentDevelopmentRole", "PolicyName": "CompanyAgentRevokedSessions", "PolicyDocument": ANY})
+    stub.add_response("put_role_policy", {}, {"RoleName": "AIAgentDevelopmentRole", "PolicyName": "TetherRevokedSessions", "PolicyDocument": ANY})
     with stub:
         r = client.post("/v1/admin/revoke", headers=ORCH, json={"session_ids": [sid], "reason": "INC-7"})
     assert r.status_code == 200, r.text

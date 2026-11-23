@@ -24,7 +24,7 @@
 
 | 주체 | 설명 |
 |---|---|
-| 개발자 | 기존과 같습니다. `company-agent` → 오케스트레이터 → OpenShell 샌드박스 안의 Claude Code/Codex |
+| 개발자 | 기존과 같습니다. `tether` → 오케스트레이터 → OpenShell 샌드박스 안의 Claude Code/Codex |
 | 로컬 LLM 에이전트 | GPU 서버에서 서빙하는 자체 모델로 동작하는 에이전트입니다. 도구 호출과 egress가 있습니다 |
 
 ML 엔지니어가 GPU를 직접 쓰는 작업(학습, 평가)은 이번 범위에 넣지 않습니다.
@@ -75,7 +75,7 @@ GPU 서버 네트워크는 우리 팀이 강제합니다.
 ```text
  개발자 Mac                   컨트롤 플레인                         데이터 플레인 (OpenShell gateway)
 ┌──────────────┐  launch  ┌──────────────┐ 세션  ┌────────────┐
-│ company-agent│─────────►│ Orchestrator │──────►│ Policy API │◄── CI (서명 정책 번들: 네트워크·가드레일·모델)
+│ tether│─────────►│ Orchestrator │──────►│ Policy API │◄── CI (서명 정책 번들: 네트워크·가드레일·모델)
 └──────────────┘          │              │       └─────┬──────┘
 ┌──────────────┐ trigger  │              │             │ 세션·정책 조회
 │ 서비스 트리거  │─────────►│ (workload ID)│             │

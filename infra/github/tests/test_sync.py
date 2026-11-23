@@ -10,9 +10,9 @@ import sync_ip_allow_list as s  # noqa: E402
 
 ORG = {"id": "O_1", "ipAllowListEnabledSetting": "DISABLED", "ipAllowListForInstalledAppsEnabledSetting": "DISABLED",
        "ipAllowListEntries": {"nodes": [
-           {"id": "E_old", "allowListValue": "192.0.2.0/24", "name": "company-agent: old-egress", "isActive": True},
+           {"id": "E_old", "allowListValue": "192.0.2.0/24", "name": "tether: old-egress", "isActive": True},
            {"id": "E_human", "allowListValue": "198.51.100.7/32", "name": "manual entry", "isActive": True},
-           {"id": "E_off", "allowListValue": "203.0.113.10/32", "name": "company-agent: sandbox-egress", "isActive": False}]}}
+           {"id": "E_off", "allowListValue": "203.0.113.10/32", "name": "tether: sandbox-egress", "isActive": False}]}}
 
 
 def fake(monkeypatch, org=ORG):
@@ -32,7 +32,7 @@ def fake(monkeypatch, org=ORG):
 def test_plan_orders_safely_and_keeps_unmanaged(monkeypatch):
     fake(monkeypatch)
     actions = s.main(["--org", "acme", "--cidr", "sandbox-egress=203.0.113.10/32", "--cidr", "vpn=198.51.100.16/28"])
-    assert actions == [("create", "198.51.100.16/28", "company-agent: vpn"), ("activate", "E_off", "203.0.113.10/32"),
+    assert actions == [("create", "198.51.100.16/28", "tether: vpn"), ("activate", "E_off", "203.0.113.10/32"),
                        ("enable", "ipAllowList", ""), ("enable", "installedApps", ""), ("delete", "E_old", "192.0.2.0/24")]
 
 

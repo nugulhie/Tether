@@ -1,13 +1,13 @@
 import os, httpx
 from mcp.server.fastmcp import FastMCP
-mcp=FastMCP("company-permission")
+mcp=FastMCP("tether-permission")
 # Set by the orchestrator in managed sandboxes; POLICY_API for local development.
-API=os.getenv("COMPANY_POLICY_API") or os.getenv("POLICY_API","http://localhost:8080")
+API=os.getenv("TETHER_POLICY_API") or os.getenv("POLICY_API","http://localhost:8080")
 def headers():
     # Injected into the sandbox as an OpenShell provider credential: the agent only sees a
     # placeholder, which the OpenShell proxy replaces with the real session token on egress.
     # User, device, repo and environment are taken from this session server-side.
-    return {"Authorization":f"Bearer {os.environ['COMPANY_SESSION_TOKEN']}"}
+    return {"Authorization":f"Bearer {os.environ['TETHER_SESSION_TOKEN']}"}
 @mcp.tool()
 async def check_permission(action:str,resource:str,context:dict|None=None)->dict:
     """Policy decision interface. It does not replace OpenShell enforcement.

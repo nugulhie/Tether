@@ -1,11 +1,11 @@
 # Session token for the Permission MCP. Bound to the Policy API's /v1/ paths only.
 # REPLACE policy-api.company.internal with your Policy API host.
-id: company-policy
+id: tether-policy
 display_name: Company Policy API
 category: other
 credentials:
   - name: session_token
-    env_vars: [COMPANY_SESSION_TOKEN]
+    env_vars: [TETHER_SESSION_TOKEN]
     required: true
     auth_style: bearer
     header_name: authorization

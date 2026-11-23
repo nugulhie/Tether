@@ -5,7 +5,7 @@ down:
 launcher:
 	python3 -m venv agent-launcher/.venv && agent-launcher/.venv/bin/pip install -e agent-launcher
 policy-validate:
-	cd services/policy-compiler && uv run -q --python 3.13 --with-editable . company-policy validate ../../policies
+	cd services/policy-compiler && uv run -q --python 3.13 --with-editable . tether-policy validate ../../policies
 gen:
 	cd services/gateway-interceptor && mkdir -p interceptor/gen && uv run -q --no-project --python 3.13 --with grpcio-tools python -m grpc_tools.protoc -Iproto --python_out=interceptor/gen --grpc_python_out=interceptor/gen proto/*.proto
 test: gen

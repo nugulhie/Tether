@@ -9,8 +9,8 @@ import app.main as m
 client = TestClient(m.app)
 KIM = {"Authorization": "Bearer dev:kim"}
 LEE = {"Authorization": "Bearer dev:lee"}
-ADMIN = {"Authorization": "Bearer dev:secops:agent-security-admins"}
-ADMIN2 = {"Authorization": "Bearer dev:kim:agent-security-admins"}  # kim, as an administrator
+ADMIN = {"Authorization": "Bearer dev:secops:tether-admins"}
+ADMIN2 = {"Authorization": "Bearer dev:kim:tether-admins"}  # kim, as an administrator
 ORCH = {"Authorization": "Bearer orchestrator-secret"}
 JOB = {"name": "nightly-deps", "repo": "git@github.com:co/repo.git", "model": "company-coder-32b",
        "task": "Update dependencies and open a pull request.", "interval_minutes": 60, "max_runtime_seconds": 1800}
@@ -98,7 +98,7 @@ def test_one_run_at_a_time_and_ending_frees_the_job():
     assert client.post(f"/v1/agent/sessions/{s['session_id']}/end", headers=KIM).status_code == 403
     assert client.post(f"/v1/agent/sessions/{s['session_id']}/end", headers=ORCH).status_code == 200
     assert events("session.end")[-1]["unmapped"]["job_id"] == j["id"]
-    assert run(j["id"], "manual", "dev:secops:agent-security-admins").status_code == 200
+    assert run(j["id"], "manual", "dev:secops:tether-admins").status_code == 200
 
 
 def test_job_session_lifetime_is_bounded_by_max_runtime():

@@ -6,5 +6,5 @@
 llm_gateway_url: https://llm-gateway.company.internal          # REPLACE
 
 # Profile identifiers (reverse DNS of your organization).
-profile_prefix: com.company.agent-security                      # REPLACE
+profile_prefix: com.company.tether                      # REPLACE
 organization: Company                                           # REPLACE

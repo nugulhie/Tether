@@ -1,5 +1,5 @@
 [project]
-name = "company-agent-permission-mcp"
+name = "tether-permission-mcp"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["mcp>=1.9,<2", "httpx>=0.28"]

@@ -2,7 +2,7 @@
 
 An OpenShell `GatewayInterceptor` gRPC service (`proto/gateway_interceptor.proto`, vendored from OpenShell 76cfd0e). It is the gateway-side enforcement of one invariant:
 
-> A sandbox exists only if the Policy API issued its name to an active session. It runs exactly that session's compiled policy and has exactly that session's providers, all built from company-vended profiles. Nothing at the gateway can widen it afterwards.
+> A sandbox exists only if the Policy API issued its name to an active session. It runs exactly that session's compiled policy and has exactly that session's providers, all built from tether-vended profiles. Nothing at the gateway can widen it afterwards.
 
 The authority is the Policy API (`GET /v1/sandboxes/{name}/authorization`), not the caller. So valid gateway credentials, including stolen orchestrator credentials, can neither create unissued sandboxes nor widen issued ones.
 

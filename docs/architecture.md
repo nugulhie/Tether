@@ -3,7 +3,7 @@
 Agents run only in remote, managed OpenShell sandboxes. Developer machines are terminals: they hold no session token, no gateway credential and no cloud/GitHub credential.
 
 ```text
-Mac (company-agent)                      Control plane                               Data plane (managed gateway)
+Mac (tether)                      Control plane                               Data plane (managed gateway)
   login (OIDC) ──────────────┐
   POST /v1/launch ───────► Sandbox orchestrator ──► Policy API: session (user token + device)
   WS /v1/attach  ◄═══PTY═══►      │                 Credential broker: STS / GitHub App token

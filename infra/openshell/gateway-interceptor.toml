@@ -7,14 +7,14 @@
 # Only company profiles exist: the stock profiles (e.g. `github`, whose broad rules would undo
 # org scoping) cannot be selected by anyone.
 provider_profile_sources = [
-  { type = "interceptor", name = "company-agent-governance" },
+  { type = "interceptor", name = "tether-governance" },
 ]
 
 [[openshell.gateway.interceptors]]
-name               = "company-agent-governance"
+name               = "tether-governance"
 grpc_endpoint      = "https://gateway-interceptor.company.internal:18081"   # REPLACE
 tls_ca_cert_path   = "/etc/openshell/interceptor-ca.pem"                   # REPLACE
-audience           = "urn:openshell:extension:interceptor:company-agent-governance"
+audience           = "urn:openshell:extension:interceptor:tether-governance"
 order              = 10
 failure_policy     = "fail_closed"
 binding_policy     = "exact"

@@ -16,11 +16,11 @@ spec:
       initContainers:
         - name: verify-weights
           image: registry.company.internal/gpu/modelsign@sha256:0000000000000000000000000000000000000000000000000000000000000000
-          args: [verify, --dir, /models, --keys, /etc/company/signing/model-keys,
+          args: [verify, --dir, /models, --keys, /etc/tether/signing/model-keys,
                  --expect-model, qwen3-32b, --expect-version, "2026-11-01"]
           volumeMounts:
             - {name: models, mountPath: /models, readOnly: true}
-            - {name: model-keys, mountPath: /etc/company/signing/model-keys, readOnly: true}
+            - {name: model-keys, mountPath: /etc/tether/signing/model-keys, readOnly: true}
       containers:
         - name: vllm
           image: registry.company.internal/gpu/vllm@sha256:0000000000000000000000000000000000000000000000000000000000000000

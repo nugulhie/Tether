@@ -146,7 +146,7 @@ def matches(policy, repo: str, environment: str, groups=()):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="company-policy")
+    ap = argparse.ArgumentParser(prog="tether-policy")
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("validate", help="validate every policy file in a directory")
     v.add_argument("dir")

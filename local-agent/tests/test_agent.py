@@ -4,8 +4,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from company_local_agent import agent
-from company_local_agent.tools import Tools
+from tether_agent import agent
+from tether_agent.tools import Tools
 
 TASK = "Bump the version in VERSION to 2 and run the tests."
 
@@ -49,9 +49,9 @@ def repo(tmp_path):
 def env(tmp_path, **extra):
     task = tmp_path / "task.txt"
     task.write_text(TASK)
-    return {"OPENAI_BASE_URL": "https://llm.company.internal/local/v1/", "COMPANY_AGENT_MODEL": "company-coder-32b",
-            "COMPANY_LLM_TOKEN": "openshell:resolve:env:COMPANY_LLM_TOKEN", "COMPANY_AGENT_TASK_FILE": str(task),
-            "COMPANY_AGENT_JOB": "job-1", **extra}
+    return {"OPENAI_BASE_URL": "https://llm.company.internal/local/v1/", "TETHER_MODEL": "company-coder-32b",
+            "TETHER_LLM_TOKEN": "openshell:resolve:env:TETHER_LLM_TOKEN", "TETHER_TASK_FILE": str(task),
+            "TETHER_JOB": "job-1", **extra}
 
 
 def run(model, environ, repo, sleeps=None):
@@ -74,7 +74,7 @@ def test_happy_path_reaches_finish(tmp_path, repo, capsys):
     req, body = model.requests[0]
     assert str(req.url) == "https://llm.company.internal/local/v1/chat/completions"
     # The placeholder is sent as-is; OpenShell swaps in the session token for the gateway host only.
-    assert req.headers["authorization"] == "Bearer openshell:resolve:env:COMPANY_LLM_TOKEN"
+    assert req.headers["authorization"] == "Bearer openshell:resolve:env:TETHER_LLM_TOKEN"
     assert body["model"] == "company-coder-32b" and body["messages"][1] == {"role": "user", "content": TASK}
     assert {t["function"]["name"] for t in body["tools"]} == {"read_file", "write_file", "list_dir", "run_shell", "finish"}
     first = model.tool_results(1)
@@ -90,14 +90,14 @@ def test_happy_path_reaches_finish(tmp_path, repo, capsys):
 
 def test_task_env_fallback(tmp_path, repo):
     environ = env(tmp_path)
-    del environ["COMPANY_AGENT_TASK_FILE"]
+    del environ["TETHER_TASK_FILE"]
     model = FakeModel(reply(call("finish", summary="done")))
-    assert run(model, {**environ, "COMPANY_AGENT_TASK": "from env"}, repo) == 0
+    assert run(model, {**environ, "TETHER_TASK": "from env"}, repo) == 0
     assert model.requests[0][1]["messages"][1]["content"] == "from env"
 
 
-@pytest.mark.parametrize("environ_patch", [{"COMPANY_LLM_TOKEN": ""}, {"COMPANY_AGENT_MODEL": ""}, {"COMPANY_AGENT_TASK_FILE": "/nonexistent"},
-                                           {"COMPANY_AGENT_MAX_STEPS": "0"}, {"COMPANY_AGENT_MAX_STEPS": "lots"}])
+@pytest.mark.parametrize("environ_patch", [{"TETHER_LLM_TOKEN": ""}, {"TETHER_MODEL": ""}, {"TETHER_TASK_FILE": "/nonexistent"},
+                                           {"TETHER_MAX_STEPS": "0"}, {"TETHER_MAX_STEPS": "lots"}])
 def test_bad_configuration_exits_before_any_request(tmp_path, repo, environ_patch):
     model = FakeModel()
     assert run(model, {**env(tmp_path), **environ_patch}, repo) == agent.EXIT_CONFIG
@@ -125,15 +125,15 @@ def test_symlink_escape_is_rejected(tmp_path, repo):
 
 def test_shell_timeout_kills_the_command(tmp_path, repo):
     model = FakeModel(reply(call("run_shell", command="sleep 30; echo never")), reply(call("finish", summary="ok")))
-    assert run(model, env(tmp_path, COMPANY_AGENT_SHELL_TIMEOUT="1"), repo) == 0
+    assert run(model, env(tmp_path, TETHER_SHELL_TIMEOUT="1"), repo) == 0
     out = model.tool_results(1)[-1]["content"]
     assert out.startswith("timed out after 1s") and "never" not in out
 
 
 def test_shell_output_is_truncated_and_runs_in_workdir_without_llm_token(tmp_path, repo):
-    model = FakeModel(reply(call("run_shell", command="pwd; echo token=${COMPANY_LLM_TOKEN:-none}; head -c 5000 /dev/zero | tr '\\0' x")),
+    model = FakeModel(reply(call("run_shell", command="pwd; echo token=${TETHER_LLM_TOKEN:-none}; head -c 5000 /dev/zero | tr '\\0' x")),
                       reply(call("finish", summary="ok")))
-    assert run(model, env(tmp_path, COMPANY_AGENT_MAX_OUTPUT_BYTES="1024"), repo) == 0
+    assert run(model, env(tmp_path, TETHER_MAX_OUTPUT_BYTES="1024"), repo) == 0
     out = model.tool_results(1)[-1]["content"]
     assert str(repo.resolve()) in out and "token=none" in out
     assert "[... truncated:" in out and len(out.encode()) < 1200
@@ -171,13 +171,13 @@ def test_transient_errors_are_retried(tmp_path, repo):
 
 def test_step_limit(tmp_path, repo, capsys):
     model = FakeModel(*[reply(call("list_dir")) for _ in range(3)])
-    assert run(model, env(tmp_path, COMPANY_AGENT_MAX_STEPS="3"), repo) == agent.EXIT_STEPS
+    assert run(model, env(tmp_path, TETHER_MAX_STEPS="3"), repo) == agent.EXIT_STEPS
     assert len(model.requests) == 3 and "step limit reached (3)" in capsys.readouterr().err
 
 
 def test_text_only_replies_do_not_finish(tmp_path, repo):
     model = FakeModel(reply(content="All done!"), reply(content="Really done."))
-    assert run(model, env(tmp_path, COMPANY_AGENT_MAX_STEPS="2"), repo) == agent.EXIT_STEPS
+    assert run(model, env(tmp_path, TETHER_MAX_STEPS="2"), repo) == agent.EXIT_STEPS
 
 
 def test_bad_tool_calls_are_reported_to_the_model(tmp_path, repo):

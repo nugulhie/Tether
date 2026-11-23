@@ -43,7 +43,7 @@ GPU 추론 서버는 회사가 서명한 가중치와 서빙 이미지만 실행
 ## 공개키 위치
 
 - 원본: 이 저장소 `infra/gpu/signing/keys/model/<key_id>.pub`, `keys/image/<key_id>.pub`(공개키만, 보안팀 CODEOWNERS 리뷰). 첫 세레모니 때 만듭니다.
-- 베어메탈: 설정관리 도구가 `/etc/company/signing/model-keys/`와 `/etc/company/signing/image-keys/`(root:root, 디렉터리 0755, 파일 0644)에 배포합니다. 서빙 사용자가 쓸 수 있으면 `verify`가 실패합니다.
+- 베어메탈: 설정관리 도구가 `/etc/tether/signing/model-keys/`와 `/etc/tether/signing/image-keys/`(root:root, 디렉터리 0755, 파일 0644)에 배포합니다. 서빙 사용자가 쓸 수 있으면 `verify`가 실패합니다.
 - 쿠버네티스: 가중치 키는 ConfigMap(`model-signing-keys`, 읽기 전용 마운트)에 둡니다. 이미지 키는 `ClusterImagePolicy`의 `authorities`에 넣습니다.
 
 ## 롤아웃

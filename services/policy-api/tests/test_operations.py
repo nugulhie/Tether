@@ -9,7 +9,7 @@ import app.main as m
 
 client = TestClient(m.app)
 USER = {"Authorization": "Bearer dev:kim"}
-ADMIN = {"Authorization": "Bearer dev:secops:agent-security-admins"}
+ADMIN = {"Authorization": "Bearer dev:secops:tether-admins"}
 SIEM = {"Authorization": "Bearer siem-secret"}
 SESSION = {"device_id": "mac-1", "agent": "claude", "repo": "git@github.com:co/repo.git"}
 

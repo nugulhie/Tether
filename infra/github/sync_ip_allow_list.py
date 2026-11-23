@@ -5,7 +5,7 @@ The organization's repositories are then reachable only from the sandbox egress 
 extra ranges you approve, such as an office or VPN egress). That closes the "clone onto an
 unmanaged machine and run an agent there" path for git, the API and GitHub App tokens alike.
 
-Entries this script manages are named "company-agent: <label>"; other entries are left alone
+Entries this script manages are named "tether: <label>"; other entries are left alone
 unless --prune-unmanaged is given. Dry run by default.
 
   GITHUB_ADMIN_TOKEN=... ./sync_ip_allow_list.py --org acme \\
@@ -19,7 +19,7 @@ import sys
 import httpx
 
 API = "https://api.github.com/graphql"
-PREFIX = "company-agent: "
+PREFIX = "tether: "
 transport = None  # overridable in tests
 
 QUERY = """query($login: String!) { organization(login: $login) { id

@@ -3,7 +3,7 @@
 The only route from agents to a model. Claude Code uses it via `ANTHROPIC_BASE_URL=https://<gateway>/anthropic` and `ANTHROPIC_AUTH_TOKEN`. Codex uses a custom provider with base URL `https://<gateway>/openai/v1`.
 
 ## What it accepts
-- **Credential:** an agent session token (`ast_…`), in `Authorization: Bearer` or `x-api-key`. In sandboxes it exists only as an OpenShell placeholder bound to this host (`openshell/profiles/company-llm.yaml`).
+- **Credential:** an agent session token (`ast_…`), in `Authorization: Bearer` or `x-api-key`. In sandboxes it exists only as an OpenShell placeholder bound to this host (`openshell/profiles/tether-llm.yaml`).
 - **Source:** addresses in `SANDBOX_EGRESS_CIDRS`. `X-Forwarded-For` is honored only from `TRUSTED_PROXY_CIDRS`.
 - **Session check:** `POST /v1/sessions/introspect` on the Policy API, cached 15 s. Revoked, expired, superseded and production sessions are refused.
 - **Routes:**

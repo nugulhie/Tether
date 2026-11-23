@@ -57,7 +57,7 @@ Create a GitHub App with at most the permissions agents may be granted, and inst
 
 ## Revocation (kill switch)
 The orchestrator calls `POST /v1/admin/revoke {session_ids, reason}` with its service token. The broker then:
-- **AWS:** writes an inline deny policy `CompanyAgentRevokedSessions` on each agent role, conditioned on `aws:PrincipalTag/session_id`. It lists only revoked sessions whose credentials have not expired yet, which keeps the policy small. The broker role needs `iam:PutRolePolicy` on the agent role.
+- **AWS:** writes an inline deny policy `TetherRevokedSessions` on each agent role, conditioned on `aws:PrincipalTag/session_id`. It lists only revoked sessions whose credentials have not expired yet, which keeps the policy small. The broker role needs `iam:PutRolePolicy` on the agent role.
 - **GitHub:** revokes each issued installation token (`DELETE /installation/token`).
 
 Issued credentials are recorded in `BROKER_DB` (SQLite). GitHub tokens are stored encrypted with `BROKER_ENCRYPTION_KEY` (Fernet). Without a key the broker refuses to issue GitHub tokens, so it never issues a token it could not revoke.

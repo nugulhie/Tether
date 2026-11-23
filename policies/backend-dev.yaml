@@ -35,8 +35,8 @@ llm:
   # local: {models: ["company-coder-*"]}
   max_requests_per_minute: 120
 # Only agent_binaries may reach the LLM gateway. Local-LLM agent jobs need their binary here, e.g. (top-level key;
-# company-local-agent is the image infra/sandbox-images/local-agent):
-# agent_binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/python, /usr/local/bin/company-local-agent]
+# tether-agent is the image infra/sandbox-images/local-agent):
+# agent_binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/python, /usr/local/bin/tether-agent]
 # Prompt/response guardrails, enforced inline by the LLM gateway for every provider.
 # A guardrail error always denies the request (on_error: deny); only an administrator's
 # time-limited, audited bypass (POST /v1/admin/guardrails/bypass) lifts that.

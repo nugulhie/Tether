@@ -1,9 +1,9 @@
-# Company AI Agent Security Platform
+# Tether
 
-OpenShell-based enterprise control plane for Claude Code / Codex. Agents run only in remote, managed sandboxes and reach models only through the company LLM gateway. Start with `docs/overview.md` (development status, phases and end-to-end flows), then `docs/architecture.md` and `docs/threat-model.md`.
+Tether is an OpenShell-based enterprise control plane for Claude Code / Codex and self-hosted local LLM agents on company GPU servers. Agents run only in remote, managed sandboxes and reach models only through the company LLM gateway. Start with `docs/overview.md` (development status, phases and end-to-end flows), then `docs/architecture.md` and `docs/threat-model.md`.
 
 ```text
-company-agent (terminal) ─► Sandbox orchestrator ─► Policy API · Credential broker · OpenShell gateway ─► Sandbox ─► LLM gateway ─► models
+tether (terminal) ─► Sandbox orchestrator ─► Policy API · Credential broker · OpenShell gateway ─► Sandbox ─► LLM gateway ─► models
 Laptops (MDM): Claude Code pinned to the LLM gateway
 ```
 
@@ -24,14 +24,14 @@ Then install OpenShell using NVIDIA's official installer and verify `openshell -
 
 ```bash
 make launcher
-company-agent login          # OIDC device flow; needs COMPANY_OIDC_ISSUER, COMPANY_OIDC_CLIENT_ID
-company-agent claude         # inside a clone of a repository in the company GitHub org
+tether login          # OIDC device flow; needs TETHER_OIDC_ISSUER, TETHER_OIDC_CLIENT_ID
+tether claude         # inside a clone of a repository in the company GitHub org
 ```
 
-With the local compose stack (`AUTH_MODE=dev`), skip login and use `export COMPANY_AGENT_TOKEN=dev:$USER COMPANY_ORCHESTRATOR=http://localhost:8083`. Launching needs the OpenShell CLI and a gateway identity in the orchestrator container.
+With the local compose stack (`AUTH_MODE=dev`), skip login and use `export TETHER_TOKEN=dev:$USER TETHER_ORCHESTRATOR=http://localhost:8083`. Launching needs the OpenShell CLI and a gateway identity in the orchestrator container.
 
 ## Identity and credentials
-- Users authenticate to the Policy API with an OIDC ID token. Behind an mTLS proxy, `DEVICE_ID_HEADER` makes the client certificate the device identity (launcher: `COMPANY_CLIENT_CERT`, `COMPANY_CLIENT_KEY`).
+- Users authenticate to the Policy API with an OIDC ID token. Behind an mTLS proxy, `DEVICE_ID_HEADER` makes the client certificate the device identity (launcher: `TETHER_CLIENT_CERT`, `TETHER_CLIENT_KEY`).
 - Only the orchestrator can create sessions, and it must present the user's own token. The session token goes into the sandbox as OpenShell provider credentials bound to the LLM gateway and Policy API hosts. Permission checks and model calls take identity from the session, never from the request.
 - The credential broker issues STS and GitHub App credentials scoped to the session. The orchestrator attaches them as OpenShell providers bound to their destinations, so the agent only sees placeholders. Issued credentials are recorded so the kill switch can revoke them.
 - Audit events are OCSF-normalized, stored in `audit_events` and written to stdout as JSON lines for SIEM shipping.
@@ -48,7 +48,7 @@ make test
 
 ## Policy management (GitOps)
 Policies live in `policies/*.yaml` and change only through reviewed pull requests (`.github/CODEOWNERS`, branch protection on `main`).
-- Pull request: CI runs `company-policy validate policies` and the compiler tests.
+- Pull request: CI runs `tether-policy validate policies` and the compiler tests.
 - Merge to `main`: CI builds a bundle (serial = commit count on `main`), signs it with Ed25519 and posts it to `POST /v1/policies/bundle`.
 - The Policy API checks the signature (`POLICY_BUNDLE_PUBLIC_KEY`) and refuses a bundle if:
   - its serial is not newer than the last bundle (replay),
@@ -60,7 +60,7 @@ Policies live in `policies/*.yaml` and change only through reviewed pull request
 - Network changes reach running sandboxes on the next launch (`openshell policy set`). Filesystem, process and credential changes create a new sandbox.
 
 ```bash
-company-policy keygen signing.pem signing.pub   # once; store signing.pem as a CI secret
+tether-policy keygen signing.pem signing.pub   # once; store signing.pem as a CI secret
 make policy-validate
 ```
 

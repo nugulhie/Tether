@@ -19,7 +19,7 @@ import app.purge as cli
 
 client = TestClient(m.app)
 USER = {"Authorization": "Bearer dev:Kim.Dev"}
-ADMIN = {"Authorization": "Bearer dev:secops:agent-security-admins"}
+ADMIN = {"Authorization": "Bearer dev:secops:tether-admins"}
 GATEWAY = {"Authorization": "Bearer gateway-secret"}
 SIEM = {"Authorization": "Bearer siem-secret"}
 KEY = Fernet.generate_key().decode()

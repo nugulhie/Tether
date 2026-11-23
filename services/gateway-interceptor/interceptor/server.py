@@ -68,12 +68,12 @@ class Service(gi_grpc.GatewayInterceptorServicer):
         if request.gateway.protocol_version.major != 1 or CONTRACT not in request.gateway.supported_capabilities:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "gateway does not speak gateway-interceptor protocol 1")
         return gi.InterceptorManifest(
-            name="company-agent-governance", failure_policy="fail_closed", provider_profiles=True, expected_audience=self.audience,
-            bindings=[gi.InterceptorBinding(id=f"company-{m}", selector=gi.InterceptorSelector(rpc=f"openshell.v1.OpenShell/{m}"),
+            name="tether-governance", failure_policy="fail_closed", provider_profiles=True, expected_audience=self.audience,
+            bindings=[gi.InterceptorBinding(id=f"tether-{m}", selector=gi.InterceptorSelector(rpc=f"openshell.v1.OpenShell/{m}"),
                                             phases=[PHASES[p] for p in phases], failure_policy="fail_closed")
                       for m, phases in BINDINGS.items()],
             extension=extension_pb2.PeerMetadata(
-                protocol_version=extension_pb2.ProtocolVersion(major=1, minor=0), implementation_name="company/agent-governance",
+                protocol_version=extension_pb2.ProtocolVersion(major=1, minor=0), implementation_name="tether/governance",
                 implementation_version="0.1.0", supported_capabilities=[CONTRACT], required_capabilities=[CONTRACT]))
 
     async def SnapshotProviderProfiles(self, request, context):
@@ -115,7 +115,7 @@ def gateway_token_verifier(public_key_pem: str, gateway_id: str, audience: str):
 
 
 def build_service() -> Service:
-    audience = env("INTERCEPTOR_AUDIENCE", "urn:openshell:extension:interceptor:company-agent-governance")
+    audience = env("INTERCEPTOR_AUDIENCE", "urn:openshell:extension:interceptor:tether-governance")
     profiles = load_profiles(env("PROFILES_DIR", "/profiles"))
     governance = Governance(policy_api_authorize, {p.id for p in profiles},
                             {i for i in env("ALLOWED_SANDBOX_IMAGES").split(",") if i}, env("PLATFORM_ADMIN_ROLE", "openshell-platform-admin"))

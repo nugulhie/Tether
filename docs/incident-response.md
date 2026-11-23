@@ -13,7 +13,7 @@ The orchestrator then does all of the following:
 2. Cuts live terminals for those sessions.
 3. Deletes their sandboxes on the gateway.
 4. Asks the broker to revoke issued credentials:
-   - AWS: an inline deny policy `CompanyAgentRevokedSessions` on the agent role, keyed on the `session_id` principal tag;
+   - AWS: an inline deny policy `TetherRevokedSessions` on the agent role, keyed on the `session_id` principal tag;
    - GitHub: the installation token is revoked.
 
 A non-200 response lists what did not complete; finish those steps by hand:

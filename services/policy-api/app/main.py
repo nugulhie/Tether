@@ -156,8 +156,8 @@ def platform():
 def sandbox_providers(sandbox,doc):
     """OpenShell provider instances a sandbox may have, as {name: profile id}. The orchestrator
     creates exactly these and the gateway interceptor allows nothing else."""
-    out={f"{sandbox}-llm":"company-llm",f"{sandbox}-policy":"company-policy"}
-    if (doc.get("aws") or {}).get("role"): out[f"{sandbox}-aws"]="company-aws"
+    out={f"{sandbox}-llm":"tether-llm",f"{sandbox}-policy":"tether-policy"}
+    if (doc.get("aws") or {}).get("role"): out[f"{sandbox}-aws"]="tether-aws"
     if (doc.get("github") or {}).get("permissions"): out[f"{sandbox}-github"]="github-org"
     return out
 

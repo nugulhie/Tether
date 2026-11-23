@@ -10,7 +10,7 @@ import subprocess
 
 # Environment variables run_shell children never get. They hold only OpenShell placeholders, but
 # nothing the model runs needs the LLM gateway credential.
-SHELL_ENV_DROP = ("COMPANY_LLM_TOKEN", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "COMPANY_AGENT_TASK")
+SHELL_ENV_DROP = ("TETHER_LLM_TOKEN", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "TETHER_TASK")
 MAX_WRITE_BYTES = 4 * 1024 * 1024
 MAX_LIST_ENTRIES = 1000
 

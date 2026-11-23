@@ -1,8 +1,8 @@
 # Session token for the company LLM gateway. Bound to the gateway host only: the OpenShell
 # proxy substitutes the placeholder nowhere else (403 credential_endpoint_mismatch).
-# Import once per gateway (platform admin):  openshell profile import -f company-llm.yaml --global
+# Import once per gateway (platform admin):  openshell profile import -f tether-llm.yaml --global
 # REPLACE llm-gateway.company.internal with your gateway host (and set allowed_ips).
-id: company-llm
+id: tether-llm
 display_name: Company LLM gateway
 category: inference
 credentials:
@@ -12,7 +12,7 @@ credentials:
     auth_style: bearer
     header_name: authorization
   - name: openai_token
-    env_vars: [COMPANY_LLM_TOKEN]
+    env_vars: [TETHER_LLM_TOKEN]
     required: true
     auth_style: bearer
     header_name: authorization
@@ -23,5 +23,5 @@ endpoints:
     protocol: rest
     enforcement: enforce
     access: read-write
-# company-local-agent: the local-LLM job agent (local-agent/, image infra/sandbox-images/local-agent).
-binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/company-local-agent]
+# tether-agent: the local-LLM job agent (local-agent/, image infra/sandbox-images/local-agent).
+binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/tether-agent]

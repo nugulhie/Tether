@@ -1,11 +1,11 @@
 [project]
-name = "company-agent-policy-compiler"
+name = "tether-policy-compiler"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["PyYAML>=6.0", "cryptography>=42"]
 [project.scripts]
-company-policy-compile = "policy_compiler.compiler:main"
-company-policy = "policy_compiler.bundle:main"
+tether-policy-compile = "policy_compiler.compiler:main"
+tether-policy = "policy_compiler.bundle:main"
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"

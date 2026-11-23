@@ -114,5 +114,5 @@ def service_principal(token: str) -> Principal | None:
 
 
 def is_admin(p: Principal) -> bool:
-    admins = {g for g in env("ADMIN_GROUPS", "agent-security-admins").split(",") if g}
+    admins = {g for g in env("ADMIN_GROUPS", "tether-admins").split(",") if g}
     return p.kind == "user" and bool(admins & set(p.groups))

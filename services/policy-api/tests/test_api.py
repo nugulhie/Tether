@@ -85,7 +85,7 @@ class TestOIDC:
     def oidc(self, monkeypatch):
         monkeypatch.setenv("AUTH_MODE", "oidc")
         monkeypatch.setenv("OIDC_ISSUER", "https://idp.example.com")
-        monkeypatch.setenv("OIDC_AUDIENCE", "company-agent")
+        monkeypatch.setenv("OIDC_AUDIENCE", "tether")
         monkeypatch.setenv("OIDC_JWKS_URL", "https://idp.example.com/jwks")
         pub = self.key.public_key()
 
@@ -96,7 +96,7 @@ class TestOIDC:
 
     def token(self, key=None, **claims):
         now = int(time.time())
-        c = {"iss": "https://idp.example.com", "aud": "company-agent", "iat": now, "exp": now + 300, "email": "lee@company.com", **claims}
+        c = {"iss": "https://idp.example.com", "aud": "tether", "iat": now, "exp": now + 300, "email": "lee@company.com", **claims}
         return {"Authorization": "Bearer " + jwt.encode(c, key or self.key, algorithm="RS256")}
 
     def test_valid_token(self):
@@ -491,7 +491,7 @@ def test_sandbox_authorization_matches_session():
     assert a.status_code == 200
     body = a.json()
     assert body["openshell_policy"] == s["openshell_policy"] and body["providers"] == s["providers"]
-    assert set(body["providers"].values()) == {"company-llm", "company-policy", "github-org"}
+    assert set(body["providers"].values()) == {"tether-llm", "tether-policy", "github-org"}
     assert body["session_id"] == s["session_id"]
 
 

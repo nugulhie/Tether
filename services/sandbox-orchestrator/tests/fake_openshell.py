@@ -3,7 +3,7 @@
 import json, os, sys
 state, log = os.environ["FAKE_STATE"], os.environ["FAKE_LOG"]
 argv = sys.argv[1:]
-secret_env = {k: os.environ[k] for k in ("ANTHROPIC_AUTH_TOKEN", "COMPANY_LLM_TOKEN", "COMPANY_SESSION_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY") if k in os.environ}
+secret_env = {k: os.environ[k] for k in ("ANTHROPIC_AUTH_TOKEN", "TETHER_LLM_TOKEN", "TETHER_SESSION_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY") if k in os.environ}
 # Non-interactive execs get stdin (the orchestrator passes data or /dev/null, never its own stdin).
 stdin = sys.stdin.read() if argv[:2] == ["sandbox", "exec"] and "--no-tty" in argv else None
 with open(log, "a") as f:
@@ -37,7 +37,7 @@ if cmd == ["sandbox", "exec"]:
     if "--no-tty" in argv:  # a non-interactive local agent run
         import time
         envs = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "--env")
-        if "COMPANY_AGENT_TASK_FILE" in envs and not os.path.exists(sandbox_file(name, envs["COMPANY_AGENT_TASK_FILE"])):
+        if "TETHER_TASK_FILE" in envs and not os.path.exists(sandbox_file(name, envs["TETHER_TASK_FILE"])):
             sys.exit(66)  # like the real agent: no task file, no run
         time.sleep(float(os.environ.get("FAKE_AGENT_SLEEP", "0")))
         sys.exit(int(os.environ.get("FAKE_AGENT_RC", "0")))

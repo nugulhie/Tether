@@ -14,7 +14,7 @@ Legend: [x] implemented in this repository · [ ] needs environment-specific wor
 - [x] OpenShell provider profiles with credential endpoint binding (`openshell/profiles/`)
 - [ ] Deploy the OpenShell gateway remotely (Kubernetes Helm chart) with OIDC/mTLS; give only the orchestrator a client identity
 - [ ] Configure the gateway `upstreamProxy` with a fixed egress IP; set `SANDBOX_EGRESS_CIDRS` on the LLM gateway to it
-- [ ] Replace hosts and `your-org` in `openshell/profiles/` (vended by the interceptor; no manual import). Add a `company-aws.yaml` profile before granting `aws.role` in any policy (SigV4 re-signing endpoints); until then AWS grants fail closed at sandbox creation
+- [ ] Replace hosts and `your-org` in `openshell/profiles/` (vended by the interceptor; no manual import). Add a `tether-aws.yaml` profile before granting `aws.role` in any policy (SigV4 re-signing endpoints); until then AWS grants fail closed at sandbox creation
 - [ ] Sandbox image: Claude Code/Codex, `infra/mdm/out/sandbox/managed-settings.json` at `/etc/claude-code/managed-settings.json`, Codex provider config pointing at the gateway; git credential config compatible with the github-org profile (mirror the stock profile's auth style)
 - [x] Gateway interceptor (`services/gateway-interceptor`): issued-name-only sandboxes, policy/provider replacement, widening and side doors denied, company profiles vended
 - [ ] Deploy it with TLS, `GATEWAY_ID` and the gateway's extension public key; add `infra/openshell/gateway-interceptor.toml` to the gateway configuration; set `ALLOWED_SANDBOX_IMAGES`
@@ -23,7 +23,7 @@ Legend: [x] implemented in this repository · [ ] needs environment-specific wor
 
 ## Launcher
 - [x] Thin client: login, launch, terminal; runs no OpenShell and holds no credentials
-- [x] Managed config (`/Library/Application Support/CompanyAgent/config.json`, root-owned) overrides environment
+- [x] Managed config (`/Library/Application Support/Tether/config.json`, root-owned) overrides environment
 - [x] Build script producing an ad-hoc signed binary and unsigned pkg (`agent-launcher/packaging/build-macos.sh`); no Apple Developer account needed
 - [ ] Distribute the pkg via MDM (check your MDM accepts unsigned packages)
 

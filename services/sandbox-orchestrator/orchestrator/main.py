@@ -145,11 +145,11 @@ async def provision(s: dict, credential_auth: dict, org: str, repo_name: str, ag
     broker = env("CREDENTIAL_BROKER", "http://localhost:8081")
 
     async def credentials(profile):
-        if profile == "company-llm":
-            return {"ANTHROPIC_AUTH_TOKEN": token, "COMPANY_LLM_TOKEN": token}
-        if profile == "company-policy":
-            return {"COMPANY_SESSION_TOKEN": token}
-        if profile == "company-aws":
+        if profile == "tether-llm":
+            return {"ANTHROPIC_AUTH_TOKEN": token, "TETHER_LLM_TOKEN": token}
+        if profile == "tether-policy":
+            return {"TETHER_SESSION_TOKEN": token}
+        if profile == "tether-aws":
             a = await call("POST", f"{broker}/v1/credentials/aws", headers=credential_auth, json_body={"session_id": s["session_id"]})
             return {"AWS_ACCESS_KEY_ID": a["AccessKeyId"], "AWS_SECRET_ACCESS_KEY": a["SecretAccessKey"], "AWS_SESSION_TOKEN": a["SessionToken"]}
         if profile == "github-org":
@@ -161,7 +161,7 @@ async def provision(s: dict, credential_auth: dict, org: str, repo_name: str, ag
 
     name = s["sandbox_name"]
     workdir = f"/workspace/{repo_name}"
-    labels = {"managed-by": "company-orchestrator", "session": s["session_id"], "user": re.sub(r"[^a-z0-9-]", "-", s["user_id"].lower())[:63]}
+    labels = {"managed-by": "tether-orchestrator", "session": s["session_id"], "user": re.sub(r"[^a-z0-9-]", "-", s["user_id"].lower())[:63]}
     if s.get("job"):
         labels["job"] = s["job"]["id"]
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, dir=env("ORCHESTRATOR_STATE_DIR") or None) as f:
@@ -218,7 +218,7 @@ async def attach(ws: WebSocket, ticket: str, rows: int = 24, cols: int = 80):
         return
     await ws.accept()
     agent_env = {"ANTHROPIC_BASE_URL": f"{env('LLM_GATEWAY_URL')}/anthropic", "OPENAI_BASE_URL": f"{env('LLM_GATEWAY_URL')}/openai/v1",
-                 "COMPANY_POLICY_API": env("POLICY_API_PUBLIC_URL")}
+                 "TETHER_POLICY_API": env("POLICY_API_PUBLIC_URL")}
     relay = Relay(openshell.exec_tty_argv(t.sandbox, AGENTS[t.agent], t.workdir, agent_env), rows, cols)
     await relay.start()
     state.relays[t.session_id] = relay
@@ -237,14 +237,14 @@ async def attach(ws: WebSocket, ticket: str, rows: int = 24, cols: int = 80):
 
 # --- local-LLM agent jobs (ADR 0001, D1) ------------------------------------------------
 
-DEFAULT_LOCAL_AGENT = ["company-local-agent"]
+DEFAULT_LOCAL_AGENT = ["tether-agent"]
 # Outside the repository (/workspace/<repo>), so the agent cannot commit it. A repository with this
 # exact name would make the write fail (it is a directory), never land the task inside the repo.
-TASK_FILE = "/workspace/.company-agent-task"
+TASK_FILE = "/workspace/.tether-task"
 
 
 def local_agent_argv() -> list[str]:
-    # JSON list, e.g. ["company-local-agent", "--non-interactive"]; the agent reads its task from COMPANY_AGENT_TASK_FILE.
+    # JSON list, e.g. ["tether-agent", "--non-interactive"]; the agent reads its task from TETHER_TASK_FILE.
     raw = env("LOCAL_AGENT_COMMAND")
     return json.loads(raw) if raw else DEFAULT_LOCAL_AGENT
 
@@ -261,8 +261,8 @@ async def run_job(s: dict, name: str, workdir: str):
     job = s["job"]
     # The task goes in through stdin to a file, never argv/--env: those show up in process listings
     # on the orchestrator host and in the sandbox. Only its path is passed to the agent.
-    agent_env = {"OPENAI_BASE_URL": f"{env('LLM_GATEWAY_URL')}/local/v1", "COMPANY_POLICY_API": env("POLICY_API_PUBLIC_URL"),
-                 "COMPANY_AGENT_MODEL": job["model"], "COMPANY_AGENT_TASK_FILE": TASK_FILE, "COMPANY_AGENT_JOB": job["id"]}
+    agent_env = {"OPENAI_BASE_URL": f"{env('LLM_GATEWAY_URL')}/local/v1", "TETHER_POLICY_API": env("POLICY_API_PUBLIC_URL"),
+                 "TETHER_MODEL": job["model"], "TETHER_TASK_FILE": TASK_FILE, "TETHER_JOB": job["id"]}
     result = {"sandbox_name": name, "job_id": job["id"], "trigger": job["trigger"], "triggered_by": job["triggered_by"],
               "returncode": None, "timed_out": False}
 

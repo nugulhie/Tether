@@ -140,11 +140,11 @@ def test_rejects_bad_github_org(org):
 
 def test_platform_endpoints_only_for_agent_binaries():
     c = compile_policy(BASE, platform={"llm_gateway_host": "llm.company.internal", "policy_api_host": "policy.company.internal"})
-    gw, api = c["network_policies"]["company_llm_gateway"], c["network_policies"]["company_policy_api"]
+    gw, api = c["network_policies"]["tether_llm_gateway"], c["network_policies"]["tether_policy_api"]
     assert gw["endpoints"][0]["host"] == "llm.company.internal" and gw["endpoints"][0]["access"] == "read-write"
     assert {r["allow"]["path"] for r in api["endpoints"][0]["rules"]} == {"/v1/**"}
     assert [b["path"] for b in gw["binaries"]] == BASE.get("agent_binaries", ["/usr/local/bin/claude", "/usr/local/bin/codex", "/usr/local/bin/node", "/usr/local/bin/python"])
-    assert "company_llm_gateway" not in compile_policy(BASE)["network_policies"]
+    assert "tether_llm_gateway" not in compile_policy(BASE)["network_policies"]
 
 
 def test_model_provider_hosts_never_reachable_directly():

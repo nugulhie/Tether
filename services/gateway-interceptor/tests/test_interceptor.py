@@ -23,7 +23,7 @@ DOC = document(yaml.safe_load((ROOT / "policies" / "backend-dev.yaml").read_text
 PLATFORM = {"llm_gateway_host": "llm-gateway.company.internal", "policy_api_host": "policy-api.company.internal"}
 ISSUED = compile_policy(DOC, "/workspace", PLATFORM)
 NAME = "agent-kim-0a1b2c3d-4e5f6a7b"
-PROVIDERS = {f"{NAME}-llm": "company-llm", f"{NAME}-policy": "company-policy", f"{NAME}-github": "github-org"}
+PROVIDERS = {f"{NAME}-llm": "tether-llm", f"{NAME}-policy": "tether-policy", f"{NAME}-github": "github-org"}
 AUTH = {"authorized": True, "sandbox_name": NAME, "session_id": "sid-1", "user_id": "kim", "policy_version": 2,
         "policy_hash": "abc", "openshell_policy": ISSUED, "providers": PROVIDERS}
 PROFILES = server.load_profiles(str(ROOT / "openshell" / "profiles"))
@@ -151,7 +151,7 @@ def test_describe_rejects_incompatible_gateway(api):
 
 def test_vends_only_company_profiles(api):
     snap = run(with_stub(lambda s: s.SnapshotProviderProfiles(gi.ProviderProfileSnapshotRequest())))
-    assert [p.id for p in snap.profiles] == ["company-llm", "company-policy", "github-org"]
+    assert [p.id for p in snap.profiles] == ["github-org", "tether-llm", "tether-policy"]
     assert snap.revision.startswith("sha256:")
 
 
@@ -164,7 +164,7 @@ def test_create_gets_issued_policy_and_providers_whatever_was_sent(api):
     patched = apply_patches(attacker, m.patches)
     assert convert.policy_from_json(patched["spec"]["policy"]) == convert.sandbox_policy(ISSUED)
     assert patched["spec"]["providers"] == sorted(PROVIDERS)
-    assert patched["annotations"]["company.agent-security/session-id"] == "sid-1" and patched["annotations"]["x"] == "y"
+    assert patched["annotations"]["tether/session-id"] == "sid-1" and patched["annotations"]["x"] == "y"
     assert m.log_annotations["user"] == "kim"
     assert evaluate("CreateSandbox", "validate", patched).allowed
 
@@ -244,12 +244,12 @@ def test_global_settings_for_platform_admins_only(api):
 
 @pytest.mark.parametrize("name,ptype,allowed", [
     (f"{NAME}-github", "github-org", True),
-    (f"{NAME}-llm", "company-llm", True),
+    (f"{NAME}-llm", "tether-llm", True),
     (f"{NAME}-github", "github", False),                   # stock profile: not vended
     (f"{NAME}-llm", "github-org", False),                   # wrong profile for the name
-    (f"{NAME}-aws", "company-aws", False),                  # not issued to this session
+    (f"{NAME}-aws", "tether-aws", False),                  # not issued to this session
     ("agent-made-up-0-0-github", "github-org", False),      # no active session
-    ("my-personal-token", "company-llm", False),
+    ("my-personal-token", "tether-llm", False),
 ])
 def test_create_provider(api, name, ptype, allowed):
     op = {"provider": {"metadata": {"name": name}, "type": ptype}}
@@ -315,8 +315,8 @@ def test_gateway_config_matches_manifest_exactly():
     from interceptor.rules import BINDINGS
     cfg = tomllib.loads((ROOT / "infra" / "openshell" / "gateway-interceptor.toml").read_text())
     ic = cfg["openshell"]["gateway"]["interceptors"][0]
-    assert (ic["failure_policy"], ic["binding_policy"], ic["name"]) == ("fail_closed", "exact", "company-agent-governance")
-    assert ic["audience"] == "urn:openshell:extension:interceptor:company-agent-governance"
+    assert (ic["failure_policy"], ic["binding_policy"], ic["name"]) == ("fail_closed", "exact", "tether-governance")
+    assert ic["audience"] == "urn:openshell:extension:interceptor:tether-governance"
     configured = {b["rpc"].split("/")[1]: tuple(b["phases"]) for b in ic["bindings"]}
     assert configured == BINDINGS
-    assert cfg["openshell"]["gateway"]["provider_profile_sources"] == [{"type": "interceptor", "name": "company-agent-governance"}]
+    assert cfg["openshell"]["gateway"]["provider_profile_sources"] == [{"type": "interceptor", "name": "tether-governance"}]
