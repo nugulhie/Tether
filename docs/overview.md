@@ -262,7 +262,7 @@ sequenceDiagram
 
 | 구분 | 내용 |
 |---|---|
-| 단위·통합 테스트 | `make test`: Python 604개(컴파일러 87, Policy API 163, Broker 28, LLM Gateway 74, Orchestrator 27, Interceptor 61, GitHub 동기화 7, 런처 17, MDM 생성기 6, 로컬 에이전트 22, GPU 네트워크 71, 서명 41) |
+| 단위·통합 테스트 | `make test`: Python 644개(컴파일러 91, Policy API 163, Broker 28, LLM Gateway 74, Orchestrator 32, Interceptor 92, GitHub 동기화 7, 런처 17, MDM 생성기 6, 로컬 에이전트 22, GPU 네트워크 71, 서명 41) |
 | 실제 프로세스 E2E | 실제 TTY 런처 → WebSocket → 서버 PTY → (가짜) OpenShell exec, 입력 중계와 종료 코드 |
 | 컨테이너 E2E | 마이그레이션(기존 볼륨, 0001→0005), 오케스트레이터 전용 세션, LLM 게이트웨이(개인 토큰과 미허용 모델 거부, Anthropic까지 중계), interceptor gRPC 공격 시나리오, 킬 스위치, SIEM 조회 |
 | GPU 경계 E2E | Docker에서 생성한 envoy 설정과 nftables 적용 후 `verify.py`: 샌드박스 쪽 6/6, gateway 쪽 9/9 통과. `sshd -T`로 GPU 호스트·bastion 설정 확인 |

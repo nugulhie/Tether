@@ -29,4 +29,7 @@ COPY --from=build --chown=root:root --chmod=0755 /out/tether-agent /usr/local/bi
 # The proxy's CA is trusted via the system store; the agent also honors SSL_CERT_FILE.
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 USER sandbox
+# OpenShell (Docker driver) makes the image WORKDIR the sandbox workspace; without one it uses /sandbox.
+# The orchestrator clones into /workspace/<repo> and writes the task to /workspace/.tether-task, and the
+# compiled policy grants /workspace read-write, so this must stay /workspace (owned by `sandbox`, above).
 WORKDIR /workspace

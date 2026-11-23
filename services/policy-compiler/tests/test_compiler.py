@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from policy_compiler import PolicyError, compile_policy, policy_hash
+from policy_compiler.compiler import BASELINE_READ_ONLY, BASELINE_READ_WRITE
 from policy_compiler.bundle import document
 
 BASE = document(yaml.safe_load((Path(__file__).parents[3] / "policies" / "backend-dev.yaml").read_text()))
@@ -19,9 +20,37 @@ def policy(**changes):
 def test_compiles_filesystem_with_workspace_first_and_deduped():
     p = policy(filesystem={"read_only": ["/usr", "/usr"], "read_write": ["/workspace", "/tmp"]})
     fs = compile_policy(p)["filesystem_policy"]
-    assert fs["read_only"] == ["/usr"]
-    assert fs["read_write"] == ["/workspace", "/tmp"]
+    assert fs["read_only"] == ["/usr", *[x for x in BASELINE_READ_ONLY if x != "/usr"]]
+    assert fs["read_write"] == ["/workspace", "/tmp", "/dev/null"]
     assert fs["include_workdir"] is False
+
+
+def supervisor_enrich(fs):
+    """OpenShell v0.1.9 enrich_proto_baseline_paths (openshell-supervisor), every path present."""
+    ro, rw = list(fs["read_only"]), list(fs["read_write"])
+    for x in ["/usr", "/lib", "/etc", "/app", "/var/log", "/proc", "/dev/urandom"]:
+        if x not in ro and x not in rw:
+            ro.append(x)
+    for x in ["/tmp", "/dev/null"]:
+        if x not in rw and x not in ro:
+            rw.append(x)
+    return {**fs, "read_only": ro, "read_write": rw}
+
+
+@pytest.mark.parametrize("fs", [{"read_only": ["/usr"]}, {"read_only": ["/opt/tools", "/tmp"], "read_write": ["/etc"]},
+                                {"read_only": ["/usr", "/lib", "/proc", "/dev/urandom", "/etc", "/var/log"], "read_write": ["/tmp", "/dev/null"]}])
+def test_supervisor_baseline_enrichment_is_a_no_op(fs):
+    """The supervisor saves an enriched policy back with UpdateConfig; the interceptor accepts only the issued
+    one, so the compiled policy must already contain every baseline path."""
+    compiled = compile_policy(policy(filesystem=fs))["filesystem_policy"]
+    assert supervisor_enrich(compiled) == compiled
+    assert (BASELINE_READ_ONLY, BASELINE_READ_WRITE) == (("/usr", "/lib", "/etc", "/app", "/var/log", "/proc", "/dev/urandom"), ("/tmp", "/dev/null"))
+
+
+def test_baseline_never_changes_the_access_of_a_listed_path():
+    fs = compile_policy(policy(filesystem={"read_only": ["/tmp"], "read_write": ["/etc"]}))["filesystem_policy"]
+    assert "/tmp" in fs["read_only"] and "/tmp" not in fs["read_write"]
+    assert "/etc" in fs["read_write"] and "/etc" not in fs["read_only"]
 
 
 def test_runs_as_unprivileged_sandbox_user():
@@ -143,7 +172,9 @@ def test_platform_endpoints_only_for_agent_binaries():
     gw, api = c["network_policies"]["tether_llm_gateway"], c["network_policies"]["tether_policy_api"]
     assert gw["endpoints"][0]["host"] == "llm.company.internal" and gw["endpoints"][0]["access"] == "read-write"
     assert {r["allow"]["path"] for r in api["endpoints"][0]["rules"]} == {"/v1/**"}
-    assert [b["path"] for b in gw["binaries"]] == BASE.get("agent_binaries", ["/usr/local/bin/claude", "/usr/local/bin/codex", "/usr/local/bin/node", "/usr/local/bin/python"])
+    # Real paths only: npm's claude/codex are symlinks to JavaScript run by node; python is a symlink.
+    assert [b["path"] for b in gw["binaries"]] == BASE.get("agent_binaries", ["/usr/local/bin/node"])
+    assert all("tls" not in e and "allowed_ips" not in e for r in (gw, api) for e in r["endpoints"])
     assert "tether_llm_gateway" not in compile_policy(BASE)["network_policies"]
 
 

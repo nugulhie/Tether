@@ -1,7 +1,13 @@
 # Session token for the company LLM gateway. Bound to the gateway host only: the OpenShell
 # proxy substitutes the placeholder nowhere else (403 credential_endpoint_mismatch).
-# Import once per gateway (platform admin):  openshell profile import -f tether-llm.yaml --global
-# REPLACE llm-gateway.company.internal with your gateway host (and set allowed_ips).
+# Not imported: the gateway interceptor vends this file (SnapshotProviderProfiles) as the gateway's only
+# profile source (infra/openshell/gateway.toml). Interceptor-vended profiles are read-only, and the
+# interceptor denies ImportProviderProfiles/UpdateProviderProfiles. Changing it = changing this file and
+# redeploying the interceptor.
+# REPLACE llm-gateway.company.internal with your gateway host (= PLATFORM_LLM_GATEWAY_HOST).
+# The policy compiler emits its own rule (tether_llm_gateway) for the same host:port. OpenShell rejects a
+# policy whose endpoints on one host:port differ in `tls` or `allowed_ips`, so neither this endpoint nor the
+# compiler sets them; adding either here requires the identical value in the compiler (a test checks).
 id: tether-llm
 display_name: Company LLM gateway
 category: inference
@@ -23,5 +29,9 @@ endpoints:
     protocol: rest
     enforcement: enforce
     access: read-write
-# tether-agent: the local-LLM job agent (local-agent/, image infra/sandbox-images/local-agent).
-binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/tether-agent]
+# Real paths only (`readlink -f` inside the image): OpenShell matches the connecting process's real
+# executable or any ancestor. npm's /usr/local/bin/claude and /usr/local/bin/codex are symlinks to
+# JavaScript run by node, so node is what matches. tether-agent: the local-LLM job agent (local-agent/,
+# image infra/sandbox-images/local-agent), a real file. Binaries gate network admission only; the
+# placeholder itself is endpoint-scoped (docs/threat-model.md).
+binaries: [/usr/local/bin/node, /usr/local/bin/tether-agent]

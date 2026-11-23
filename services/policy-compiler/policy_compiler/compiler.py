@@ -168,7 +168,29 @@ def _validate_guardrails(g):
 
 
 ACCESS = ("read-only", "read-write")
-DEFAULT_AGENT_BINARIES = ["/usr/local/bin/claude", "/usr/local/bin/codex", "/usr/local/bin/node", "/usr/local/bin/python"]
+# OpenShell matches binaries by the kernel-reported real path (symlinks resolved) of the connecting
+# process or any ancestor. npm installs /usr/local/bin/claude and /usr/local/bin/codex as symlinks to
+# JavaScript run by node, so the process that matches is node: list its real path (`readlink -f
+# /usr/local/bin/node` inside the image). /usr/local/bin/python is a symlink in python images and never
+# matches; a native agent executable must be listed by its real path. Binaries gate network admission
+# only: credential placeholders are scoped to endpoints, not binaries (docs/threat-model.md).
+DEFAULT_AGENT_BINARIES = ["/usr/local/bin/node"]
+
+# Paths the OpenShell v0.1.9 supervisor adds to a policy with network rules (PROXY_BASELINE_READ_ONLY /
+# _READ_WRITE in openshell-supervisor) and then saves back to the gateway with UpdateConfig. Listing all
+# of them makes that enrichment a no-op, so the stored policy stays exactly the issued one (the gateway
+# interceptor only accepts the issued policy, and the gateway may refuse a later replacement that drops
+# paths). Like OpenShell, a path the policy already lists keeps its access; missing paths are skipped
+# by Landlock at runtime.
+BASELINE_READ_ONLY = ("/usr", "/lib", "/etc", "/app", "/var/log", "/proc", "/dev/urandom")
+BASELINE_READ_WRITE = ("/tmp", "/dev/null")
+
+
+def _with_baseline(read_only, read_write):
+    ro, rw = list(read_only), list(read_write)
+    ro += [x for x in BASELINE_READ_ONLY if x not in ro and x not in rw]
+    rw += [x for x in BASELINE_READ_WRITE if x not in rw and x not in ro]
+    return ro, rw
 
 
 def _entry(e):
@@ -207,9 +229,13 @@ def compile_policy(p, workspace=DEFAULT_WORKSPACE, platform=None):
             endpoint["access"] = access
         rules[f"tether_{i}"] = {"name": f"tether-{h}", "endpoints": [endpoint], "binaries": bins}
     agent_bins = [{"path": x} for x in p.get("agent_binaries", DEFAULT_AGENT_BINARIES)]
+    read_only, read_write = _with_baseline(_dedupe(p["filesystem"]["read_only"]), _dedupe([workspace, *p["filesystem"].get("read_write", [])]))
     for key, host, path in (("llm_gateway_host", "tether_llm_gateway", None), ("policy_api_host", "tether_policy_api", "/v1/**")):
         target = (platform or {}).get(key)
         if target:
+            # The tether-llm / tether-policy profiles contribute `_provider_*` rules for the same host:port.
+            # OpenShell rejects a policy whose endpoints on one host:port disagree on `tls` or `allowed_ips`,
+            # so neither side sets them (a test keeps openshell/profiles in step with this).
             endpoint = {"host": target, "port": 443, "protocol": "rest", "enforcement": "enforce"}
             # Model traffic needs POST; the Permission MCP only calls /v1/ on the Policy API.
             endpoint["rules" if path else "access"] = [{"allow": {"method": m, "path": path}} for m in ("GET", "POST")] if path else "read-write"
@@ -218,8 +244,8 @@ def compile_policy(p, workspace=DEFAULT_WORKSPACE, platform=None):
         "version": 1,
         "filesystem_policy": {
             "include_workdir": False,
-            "read_only": _dedupe(p["filesystem"]["read_only"]),
-            "read_write": _dedupe([workspace, *p["filesystem"].get("read_write", [])]),
+            "read_only": read_only,
+            "read_write": read_write,
         },
         "landlock": {"compatibility": "hard_requirement"},
         "process": {"run_as_user": SANDBOX_IDENTITY, "run_as_group": SANDBOX_IDENTITY},

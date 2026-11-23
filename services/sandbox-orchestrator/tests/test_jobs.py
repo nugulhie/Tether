@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import orchestrator.main as o
-from test_orchestrator import BASE_SESSION, World
+from test_orchestrator import BASE_SESSION, LOCAL_AGENT_IMAGE, World
 
 ORCH = "Bearer orch-secret"
 JOB = {"id": "job-1", "name": "nightly-deps", "owner": "kim", "repo": "git@github.com:acme/payments.git", "model": "company-coder-32b",
@@ -66,8 +66,11 @@ def test_manual_run_executes_the_approved_task_and_tears_down(monkeypatch, tmp_p
                                  "job_id": "job-1", "trigger": "manual"}
     # Credentials for job sessions are requested with the orchestrator's identity (no person behind schedules).
     assert w.credential_auth == [ORCH]
+    create = next(c["argv"] for c in w.calls() if c["argv"][:2] == ["sandbox", "create"])
+    assert create[create.index("--from") + 1] == LOCAL_AGENT_IMAGE  # jobs use the local-agent image
     run = w.agent_runs()[-1]
-    assert "--no-tty" in run and run[-1] == "tether-agent"
+    assert "--no-tty" in run and "--no-login-shell" in run and run[-1] == "tether-agent"
+    assert run[run.index("--workdir") + 1] == "/workspace/payments" and o.TASK_FILE == "/workspace/.tether-task"
     envs = dict(run[i + 1].split("=", 1) for i, a in enumerate(run) if a == "--env")
     assert envs["OPENAI_BASE_URL"] == "https://llm.company.internal/local/v1"
     assert envs["TETHER_MODEL"] == "company-coder-32b" and envs["TETHER_JOB"] == "job-1"
@@ -169,3 +172,18 @@ def test_kill_switch_accepts_job_selector(monkeypatch, tmp_path):
     assert r.status_code == 200
     revoke = next(json.loads(q.content) for q in w.requests if q.url.path == "/v1/admin/sessions/revoke")
     assert revoke["job_id"] == "job-1"
+
+
+def test_task_over_the_exec_stdin_limit_is_refused_before_provisioning(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    w.session["job"] = {**w.session["job"], "task": "x" * (4 * 1024 * 1024 + 1)}
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(o.start_job("job-1", "manual", "dev:kim"))
+    assert e.value.status_code == 422 and "4 MiB" in e.value.detail
+    assert w.calls() == [] and w.ended == ["sid-1"]
+
+
+def test_write_file_refuses_input_over_the_stdin_limit():
+    from orchestrator.openshell import MAX_EXEC_STDIN_BYTES, OpenShell, OpenShellError
+    with pytest.raises(OpenShellError, match="at most"):
+        asyncio.run(OpenShell("/nonexistent/openshell").write_file("sb", "/workspace/x", b"x" * (MAX_EXEC_STDIN_BYTES + 1)))

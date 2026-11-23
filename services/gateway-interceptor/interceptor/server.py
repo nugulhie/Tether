@@ -69,9 +69,9 @@ class Service(gi_grpc.GatewayInterceptorServicer):
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "gateway does not speak gateway-interceptor protocol 1")
         return gi.InterceptorManifest(
             name="tether-governance", failure_policy="fail_closed", provider_profiles=True, expected_audience=self.audience,
-            bindings=[gi.InterceptorBinding(id=f"tether-{m}", selector=gi.InterceptorSelector(rpc=f"openshell.v1.OpenShell/{m}"),
+            bindings=[gi.InterceptorBinding(id=f"tether-{rpc.rsplit('/', 1)[1]}", selector=gi.InterceptorSelector(rpc=rpc),
                                             phases=[PHASES[p] for p in phases], failure_policy="fail_closed")
-                      for m, phases in BINDINGS.items()],
+                      for rpc, phases in BINDINGS.items()],
             extension=extension_pb2.PeerMetadata(
                 protocol_version=extension_pb2.ProtocolVersion(major=1, minor=0), implementation_name="tether/governance",
                 implementation_version="0.1.0", supported_capabilities=[CONTRACT], required_capabilities=[CONTRACT]))
@@ -87,7 +87,7 @@ class Service(gi_grpc.GatewayInterceptorServicer):
             return gi.InterceptorResult(allowed=True)
         op = json_format.MessageToDict(getattr(request, phase).proposed_operation)
         try:
-            r = await self.governance.evaluate(request.method, phase, op, dict(request.principal))
+            r = await self.governance.evaluate(request.method, phase, op, dict(request.principal), request.service)
         except (httpx.HTTPError, convert.ConversionError) as e:
             # Not a decision: abort so the gateway applies the binding's fail_closed policy.
             log.error("evaluation failed for %s/%s: %s", request.method, phase, e)
@@ -127,16 +127,33 @@ def build_service() -> Service:
     return Service(governance, profiles, audience, verifier)
 
 
+def bind(server, addr: str) -> int:
+    """INTERCEPTOR_LISTEN: `host:port` (TLS when TLS_CERT_FILE is set) or `unix:///path`.
+
+    With gateway JWT signing on, OpenShell sends its extension token only over https:// or unix:// (plaintext
+    http:// carries no token). A Unix socket suits a gateway on the same host: the socket is created
+    owner/group-only (0660) and every call still carries the gateway's token."""
+    if addr.startswith("unix:"):
+        path = Path(addr.removeprefix("unix://") if addr.startswith("unix://") else addr.removeprefix("unix:"))
+        if path.is_socket():
+            path.unlink()  # stale socket from a previous run
+        old = os.umask(0o117)
+        try:
+            return server.add_insecure_port(addr)
+        finally:
+            os.umask(old)
+    if env("TLS_CERT_FILE"):
+        creds = grpc.ssl_server_credentials([(Path(env("TLS_KEY_FILE")).read_bytes(), Path(env("TLS_CERT_FILE")).read_bytes())])
+        return server.add_secure_port(addr, creds)
+    return server.add_insecure_port(addr)  # only behind a TLS-terminating, authenticated hop
+
+
 async def serve():
     logging.basicConfig(level=logging.INFO)
     server = grpc.aio.server()
     gi_grpc.add_GatewayInterceptorServicer_to_server(build_service(), server)
-    addr = env("LISTEN", "0.0.0.0:18081")
-    if env("TLS_CERT_FILE"):
-        creds = grpc.ssl_server_credentials([(Path(env("TLS_KEY_FILE")).read_bytes(), Path(env("TLS_CERT_FILE")).read_bytes())])
-        server.add_secure_port(addr, creds)
-    else:
-        server.add_insecure_port(addr)  # only behind a TLS-terminating, authenticated hop
+    addr = env("INTERCEPTOR_LISTEN") or env("LISTEN", "0.0.0.0:18081")
+    bind(server, addr)
     await server.start()
     log.info("gateway interceptor listening on %s", addr)
     await server.wait_for_termination()

@@ -17,7 +17,7 @@ Legend: [x] implemented in this repository · [ ] needs environment-specific wor
 - [ ] Replace hosts and `your-org` in `openshell/profiles/` (vended by the interceptor; no manual import). Add a `tether-aws.yaml` profile before granting `aws.role` in any policy (SigV4 re-signing endpoints); until then AWS grants fail closed at sandbox creation
 - [ ] Sandbox image: Claude Code/Codex, `infra/mdm/out/sandbox/managed-settings.json` at `/etc/claude-code/managed-settings.json`, Codex provider config pointing at the gateway; git credential config compatible with the github-org profile (mirror the stock profile's auth style)
 - [x] Gateway interceptor (`services/gateway-interceptor`): issued-name-only sandboxes, policy/provider replacement, widening and side doors denied, company profiles vended
-- [ ] Deploy it with TLS, `GATEWAY_ID` and the gateway's extension public key; add `infra/openshell/gateway-interceptor.toml` to the gateway configuration; set `ALLOWED_SANDBOX_IMAGES`
+- [ ] Deploy it with TLS, `GATEWAY_ID` and the gateway's extension public key; base the gateway configuration on `infra/openshell/gateway.toml` (run `openshell-gateway config preflight` on the gateway host); set `ALLOWED_SANDBOX_IMAGES`
 - [ ] ~~GitHub IP allow list~~: not applied. Laptops keep GitHub access for remote work (decision 2026-10-02); `infra/github/` is kept for later use
 - [ ] `BROKER_ENCRYPTION_KEY`, broker `iam:PutRolePolicy` on the agent role, persistent `BROKER_DB`
 

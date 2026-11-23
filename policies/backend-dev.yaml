@@ -4,7 +4,7 @@
 # Bump `version` whenever anything below changes. Only network_policies can be applied
 # to running sandboxes; filesystem/process/credential changes create new sandboxes.
 policy_id: backend-agent-dev
-version: 3
+version: 4
 priority: 0
 description: Default development policy for every repository.
 match:
@@ -16,7 +16,7 @@ filesystem:
   read_write: [/tmp, /dev/null]
 network:
   allow: [github.com, api.github.com, pypi.org, registry.npmjs.org]
-network_binaries: [/usr/bin/git, /usr/local/bin/python, /usr/local/bin/node]
+network_binaries: [/usr/bin/git, /usr/local/bin/python3.13, /usr/local/bin/node]   # real paths (readlink -f), not symlinks
 process:
   allow: [git, python, pytest, npm]
   deny: [sudo, docker, kubectl]
@@ -34,9 +34,12 @@ llm:
   # Self-hosted models on company GPU servers, reached only through the LLM gateway.
   # local: {models: ["company-coder-*"]}
   max_requests_per_minute: 120
-# Only agent_binaries may reach the LLM gateway. Local-LLM agent jobs need their binary here, e.g. (top-level key;
-# tether-agent is the image infra/sandbox-images/local-agent):
-# agent_binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/python, /usr/local/bin/tether-agent]
+# Only agent_binaries may reach the LLM gateway (default: [/usr/local/bin/node]). OpenShell matches the real path
+# of the connecting executable or any ancestor, never a symlink: npm's claude/codex are symlinks to JavaScript
+# run by node, and /usr/local/bin/python is a symlink in python images. Check with `readlink -f` in the image.
+# Local-LLM agent jobs need their binary here, e.g. (top-level key; tether-agent is the image
+# infra/sandbox-images/local-agent):
+# agent_binaries: [/usr/local/bin/node, /usr/local/bin/tether-agent]
 # Prompt/response guardrails, enforced inline by the LLM gateway for every provider.
 # A guardrail error always denies the request (on_error: deny); only an administrator's
 # time-limited, audited bypass (POST /v1/admin/guardrails/bypass) lifts that.

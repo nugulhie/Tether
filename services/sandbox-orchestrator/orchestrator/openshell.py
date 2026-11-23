@@ -8,6 +8,9 @@ Secret values are passed through the child environment (`--credential KEY`), nev
 import asyncio
 import os
 
+# `openshell sandbox exec` caps piped stdin at 4 MiB (MAX_EXEC_STDIN_BYTES in the v0.1.9 CLI).
+MAX_EXEC_STDIN_BYTES = 4 * 1024 * 1024
+
 
 class OpenShellError(RuntimeError):
     pass
@@ -46,8 +49,13 @@ class OpenShell:
         else:
             await self.run("provider", "create", "--name", name, "--type", profile, *flags, env=credentials)
 
-    async def create_sandbox(self, name: str, policy_file: str, providers: list[str], labels: dict[str, str]):
-        await self.run("sandbox", "create", "--name", name, "--policy", policy_file, "--workdir", "/workspace",
+    async def create_sandbox(self, name: str, image: str, policy_file: str, providers: list[str], labels: dict[str, str]):
+        # `sandbox create` has no --workdir: on Docker the image's WORKDIR is the workspace, so approved
+        # images declare `WORKDIR /workspace` (writable by the sandbox user). The image is always given
+        # explicitly; the gateway interceptor denies creates without one (no driver default_image).
+        # --detach: never attach to the main process; --no-auto-providers: never create providers from
+        # the orchestrator's own environment, only the ones it upserted.
+        await self.run("sandbox", "create", "--name", name, "--from", image, "--policy", policy_file, "--detach", "--no-auto-providers",
                        *[a for p in providers for a in ("--provider", p)],
                        *[a for k, v in labels.items() for a in ("--label", f"{k}={v}")])
 
@@ -63,7 +71,10 @@ class OpenShell:
                    input: bytes | None = None) -> tuple[int, str, str]:
         # env here is non-secret configuration only (base URLs, file paths); it is visible in process
         # listings. Secrets come from providers; anything else sensitive goes through stdin (`input`).
-        return await self.run("sandbox", "exec", "-n", name, "--no-tty", *(["--workdir", workdir] if workdir else []),
+        # --no-login-shell: sandbox-user profile files must not run before (or alter) automation.
+        if input is not None and len(input) > MAX_EXEC_STDIN_BYTES:
+            raise OpenShellError(f"input is {len(input)} bytes; openshell sandbox exec accepts at most {MAX_EXEC_STDIN_BYTES} bytes of stdin")
+        return await self.run("sandbox", "exec", "-n", name, "--no-tty", "--no-login-shell", *(["--workdir", workdir] if workdir else []),
                               *[a for k, v in (env or {}).items() for a in ("--env", f"{k}={v}")], "--", *argv, check=False, input=input)
 
     async def write_file(self, name: str, path: str, data: bytes) -> None:

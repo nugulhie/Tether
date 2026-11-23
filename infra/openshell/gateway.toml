@@ -1,0 +1,145 @@
+# Example OpenShell v0.1.9 gateway configuration for Tether (schema version 2, `gateway.toml`).
+# Debian package: ~/.config/openshell/gateway.toml for the `openshell-gateway` systemd user service.
+# Values marked REPLACE are deployment-specific. Validate on the gateway host before (re)starting:
+#   openshell-gateway config preflight --path ~/.config/openshell/gateway.toml
+# (the deb unit also runs `config preflight` as ExecStartPre). Restart the gateway after any change:
+# interceptor registration is static.
+#
+# binding_policy = "exact" makes the gateway refuse to start unless the bindings below match the
+# interceptor's manifest exactly. Keep in sync with services/gateway-interceptor/interceptor/rules.py
+# (a test enforces it). Teardown RPCs (Delete*, Detach*, Revoke*, StopSandbox, SuspendSandbox) are
+# deliberately unbound so incident response works even while the fail-closed interceptor is down.
+
+[openshell]
+version = 2
+
+[openshell.gateway]
+compute_driver = "docker"
+# UpdateSandbox (image/command/environment changes on a stopped sandbox) stays off; the interceptor
+# also denies it. Sandboxes are changed only by creating a new one.
+enable_sandbox_updates = false
+# Only company profiles exist: the stock profiles (e.g. `github`, whose broad rules would undo org
+# scoping) cannot be selected by anyone. Interceptor-vended profiles are read-only.
+provider_profile_sources = [
+  { type = "interceptor", name = "tether-governance" },
+]
+
+# Gateway JWT (extension tokens for the interceptor). The deb package discovers the signing bundle that
+# `openshell-gateway generate-certs` writes under OPENSHELL_LOCAL_TLS_DIR (~/.local/state/openshell/tls/jwt/)
+# with gateway_id "openshell". Run the interceptor with:
+#   GATEWAY_ID=openshell
+#   GATEWAY_EXTENSION_PUBLIC_KEY_FILE=~/.local/state/openshell/tls/jwt/public.pem
+# Elsewhere, configure it explicitly:
+# [openshell.gateway.gateway_jwt]
+# signing_key_path = "/etc/openshell/jwt/signing.pem"
+# public_key_path  = "/etc/openshell/jwt/public.pem"
+# kid_path         = "/etc/openshell/jwt/kid"
+# gateway_id       = "openshell"
+# ttl_secs         = 3600
+
+[[openshell.gateway.interceptors]]
+name               = "tether-governance"
+# With gateway JWT on, the gateway attaches its token only over unix:// or https:// (plaintext http://
+# carries none, and the interceptor would reject every call). Same host: a Unix socket, served by the
+# interceptor with INTERCEPTOR_LISTEN=unix:///run/tether/gateway-interceptor.sock (created 0660; the
+# gateway user must be able to open it). Another host: https:// plus tls_ca_cert_path, with
+# TLS_CERT_FILE/TLS_KEY_FILE on the interceptor.
+grpc_endpoint      = "unix:///run/tether/gateway-interceptor.sock"           # REPLACE
+# grpc_endpoint    = "https://gateway-interceptor.company.internal:18081"
+# tls_ca_cert_path = "/etc/openshell/interceptor-ca.pem"
+audience           = "urn:openshell:extension:interceptor:tether-governance"
+order              = 10
+failure_policy     = "fail_closed"
+binding_policy     = "exact"
+timeout            = "500ms"
+max_response_bytes = 1048576
+max_patches        = 32
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/CreateSandbox"
+phases = ["modify_operation", "validate"]
+
+# Re-activating a stopped or suspended sandbox: only under a name issued to an active session.
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/StartSandbox"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/ResumeSandbox"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/UpdateConfig"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/AttachSandboxProvider"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/CreateProvider"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/UpdateProvider"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/ImportProviderProfiles"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/UpdateProviderProfiles"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/DeleteProviderProfile"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/ConfigureProviderRefresh"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/RotateProviderCredential"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/SubmitPolicyAnalysis"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/ApproveDraftChunk"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/ApproveAllDraftChunks"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/EditDraftChunk"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/UndoDraftChunk"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/CreateSshSession"
+phases = ["validate"]
+
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.OpenShell/ExposeService"
+phases = ["validate"]
+
+# Denied outright (also disabled above with enable_sandbox_updates = false).
+[[openshell.gateway.interceptors.bindings]]
+rpc    = "openshell.v1.SandboxUpdates/UpdateSandbox"
+phases = ["validate"]
+
+[openshell.drivers.docker]
+# Used only when a create names no image, which the interceptor denies; set it to an approved,
+# digest-pinned image anyway (also listed in the interceptor's ALLOWED_SANDBOX_IMAGES).
+default_image       = "registry.company.internal/tether/sandbox-agent:1.0@sha256:0000000000000000000000000000000000000000000000000000000000000000"  # REPLACE
+# No caller-supplied template.driver_config (mounts, devices, rootfs tars). This is the default; keep it.
+allow_driver_config = false

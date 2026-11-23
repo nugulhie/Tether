@@ -14,6 +14,13 @@ from google.protobuf import json_format
 
 from . import convert
 
+OPENSHELL = "openshell.v1.OpenShell"
+SANDBOX_UPDATES = "openshell.v1.SandboxUpdates"
+# Filesystem paths the OpenShell v0.1.9 supervisor adds to a policy with network rules and saves back with
+# UpdateConfig (openshell-supervisor PROXY_BASELINE_*). Mirrors policy_compiler.compiler (a test keeps them equal).
+BASELINE_READ_ONLY = ("/usr", "/lib", "/etc", "/app", "/var/log", "/proc", "/dev/urandom")
+BASELINE_READ_WRITE = ("/tmp", "/dev/null")
+
 # Provider instance name suffix -> the only profile it may use (mirrors the Policy API).
 PROVIDER_SUFFIX = {"llm": "tether-llm", "policy": "tether-policy", "github": "github-org", "aws": "tether-aws"}
 SESSION_ANNOTATION = "tether/session-id"
@@ -51,14 +58,28 @@ def authorized_policy(auth: dict):
     return convert.sandbox_policy(auth["openshell_policy"])
 
 
-def policy_matches(proposed: dict | None, auth: dict) -> str | None:
+def without_added_baseline(got, issued):
+    """`got` minus baseline paths the issued policy does not list, each only with its baseline access. What
+    remains must equal the issued policy: anything else (another path, other access, other sections) differs."""
+    out = type(got)()
+    out.CopyFrom(got)
+    ro, rw = issued.filesystem.read_only, issued.filesystem.read_write
+    out.filesystem.ClearField("read_only")
+    out.filesystem.ClearField("read_write")
+    out.filesystem.read_only.extend(x for x in got.filesystem.read_only if x in ro or x not in BASELINE_READ_ONLY)
+    out.filesystem.read_write.extend(x for x in got.filesystem.read_write if x in rw or x not in BASELINE_READ_WRITE)
+    return out
+
+
+def policy_matches(proposed: dict | None, auth: dict, allow_baseline: bool = False) -> str | None:
     try:
         got = convert.policy_from_json(proposed)
     except json_format.ParseError as e:
         return f"unparseable sandbox policy: {e}"
-    if got != authorized_policy(auth):
-        return "sandbox policy differs from the policy the Policy API issued for this session"
-    return None
+    issued = authorized_policy(auth)
+    if got == issued or (allow_baseline and without_added_baseline(got, issued) == issued):
+        return None
+    return "sandbox policy differs from the policy the Policy API issued for this session"
 
 
 class Governance:
@@ -67,8 +88,10 @@ class Governance:
         self.authorize, self.profile_ids = authorize, profile_ids
         self.allowed_images, self.admin_role = allowed_images or set(), admin_role
 
-    async def evaluate(self, method: str, phase: str, op: dict, principal: dict[str, str]) -> Result:
-        handler = getattr(self, f"_{method}", None)
+    async def evaluate(self, method: str, phase: str, op: dict, principal: dict[str, str], service: str = OPENSHELL) -> Result:
+        # Handlers are named after public RPCs (CapitalizedMethod); helpers such as _allow are never selectable.
+        prefix = {OPENSHELL: "_", SANDBOX_UPDATES: "_SandboxUpdates_"}.get(service)
+        handler = getattr(self, prefix + method, None) if prefix and method[:1].isupper() else None
         if handler is None:
             # Every interceptable write is bound; a method we do not know is not allowed.
             return deny(f"{method} is not permitted by company governance")
@@ -106,8 +129,12 @@ class Governance:
             return deny("exposing services from agent sandboxes is not permitted")
         if get(op, "workloadTemplate", "workload_template"):
             return deny("workload templates are not permitted; the Policy API supplies the full sandbox definition")
+        # Without --from the CLI sends no spec.template and the driver's default_image would be used: an
+        # image must always be named explicitly, and be approved when an allowlist is configured.
         image = get(get(spec, "template", default={}) or {}, "image", default="")
-        if self.allowed_images and image and image not in self.allowed_images:
+        if not image:
+            return deny("sandboxes must be created from an explicit, approved image (spec.template.image)")
+        if self.allowed_images and image not in self.allowed_images:
             return deny(f"sandbox image {image!r} is not an approved agent image")
         return allow(session_id=auth["session_id"], user=auth["user_id"])
 
@@ -131,8 +158,27 @@ class Governance:
         auth = await self.authorize(sandbox)
         if not auth:
             return deny(f"no active session was issued sandbox {sandbox!r}")
-        problem = policy_matches(get(op, "policy"), auth)
+        # At startup the supervisor (sandbox principal) saves its baseline-path-enriched policy back. The
+        # compiler already lists every baseline path, so this is normally the issued policy unchanged; added
+        # baseline paths (with their baseline access, nothing else) are tolerated from the sandbox itself only.
+        # The gateway restricts a sandbox principal to its own sandbox (resolve_sandbox_by_name_for_principal).
+        problem = policy_matches(get(op, "policy"), auth, allow_baseline=principal.get("kind") == "sandbox")
         return deny(problem) if problem else allow(session_id=auth["session_id"])
+
+    # --- sandbox lifecycle -----------------------------------------------------------
+
+    async def _activate(self, phase, op, principal):
+        # Starting or resuming runs the workload again: only for a name issued to a still-active session.
+        name = get(op, "name", default="")
+        auth = await self.authorize(name)
+        if not auth:
+            return deny(f"no active session was issued sandbox {name!r}")
+        return allow(session_id=auth["session_id"])
+
+    _StartSandbox = _ResumeSandbox = _activate
+
+    async def _SandboxUpdates_UpdateSandbox(self, phase, op, principal):
+        return deny("changing a sandbox's image, command, environment or metadata is not permitted; the orchestrator creates a new sandbox")
 
     async def _AttachSandboxProvider(self, phase, op, principal):
         sandbox, provider = get(op, "sandbox", default=""), get(op, "provider", default="")
@@ -200,19 +246,23 @@ class Governance:
     async def _allow(self, phase, op, principal):
         return allow()
 
-    _DeleteSandbox = _DetachSandboxProvider = _DeleteProvider = _DeleteProviderRefresh = _allow
+    _DeleteSandbox = _StopSandbox = _SuspendSandbox = _DetachSandboxProvider = _DeleteProvider = _DeleteProviderRefresh = _allow
     _RevokeSshSession = _DeleteService = _RejectDraftChunk = _ClearDraftChunks = _allow
 
 
-# Bindings declared in the manifest. Every interceptable write that can create, widen or open
-# access to a sandbox is bound (routes.rs at OpenShell 76cfd0e). Narrowing and teardown
-# (Delete*, Detach*, Revoke*, Reject/Clear draft) are deliberately unbound so that incident
-# response can always delete sandboxes, even while this fail-closed service is down.
+# Bindings declared in the manifest, keyed by public RPC. Every interceptable write that can create,
+# (re)activate, widen or open access to a sandbox is bound (crates/openshell-gateway-interceptors/src/routes.rs
+# at OpenShell v0.1.9). Narrowing and teardown (Delete*, Detach*, Revoke*, Reject/Clear draft, and
+# StopSandbox/SuspendSandbox, which only halt a workload) are deliberately unbound so that incident response
+# can always stop and delete sandboxes, even while this fail-closed service is down. Anyone holding gateway
+# credentials can already delete a sandbox; bringing one back (StartSandbox/ResumeSandbox) is bound.
 BINDINGS = {
-    "CreateSandbox": ("modify_operation", "validate"),
-    **{m: ("validate",) for m in (
+    f"{OPENSHELL}/CreateSandbox": ("modify_operation", "validate"),
+    **{f"{OPENSHELL}/{m}": ("validate",) for m in (
+        "StartSandbox", "ResumeSandbox",
         "UpdateConfig", "AttachSandboxProvider", "CreateProvider", "UpdateProvider", "ImportProviderProfiles",
         "UpdateProviderProfiles", "DeleteProviderProfile", "ConfigureProviderRefresh", "RotateProviderCredential",
         "SubmitPolicyAnalysis", "ApproveDraftChunk", "ApproveAllDraftChunks", "EditDraftChunk", "UndoDraftChunk",
         "CreateSshSession", "ExposeService")},
+    f"{SANDBOX_UPDATES}/UpdateSandbox": ("validate",),
 }

@@ -30,7 +30,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
-from .openshell import OpenShell, OpenShellError
+from .openshell import MAX_EXEC_STDIN_BYTES, OpenShell, OpenShellError
 from .relay import Relay
 
 log = logging.getLogger("orchestrator")
@@ -132,12 +132,30 @@ def health():
     return {"status": "ok"}
 
 
+# Approved images declare `WORKDIR /workspace` (OpenShell's Docker driver makes the image WORKDIR the
+# workspace; an image without one gets /sandbox). Clones, the task file and the compiled policy's
+# read_write all assume this root.
+WORKSPACE = "/workspace"
+DIGEST_REF = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
+
+
+def sandbox_image(job: bool) -> str:
+    """The image a new sandbox is created from: SANDBOX_IMAGE for interactive agents, LOCAL_AGENT_IMAGE for
+    jobs. Always explicit and digest-pinned; the gateway interceptor allows only ALLOWED_SANDBOX_IMAGES."""
+    var = "LOCAL_AGENT_IMAGE" if job else "SANDBOX_IMAGE"
+    image = env(var)
+    if not DIGEST_REF.fullmatch(image):
+        raise HTTPException(500, f"{var} must be a digest-pinned image reference (name@sha256:<64 hex>), got {image!r}")
+    return image
+
+
 async def provision(s: dict, credential_auth: dict, org: str, repo_name: str, agent: str) -> tuple[str, str, bool]:
     """Providers, sandbox and clone for a session the Policy API issued. `credential_auth` is what the
     broker sees: the user's own token, or for job sessions the orchestrator's (jobs may run with no person)."""
     policy_org = (s["policy"].get("github") or {}).get("org")
     if policy_org and policy_org.lower() != org.lower():
         raise HTTPException(500, f"policy github.org {policy_org!r} does not match the gateway's github-org profile ({org!r})")
+    image = sandbox_image(bool(s.get("job")))
 
     # Provider names and profiles come from the Policy API; the gateway interceptor allows exactly
     # this set, so the orchestrator cannot attach anything else even by mistake.
@@ -160,7 +178,7 @@ async def provision(s: dict, credential_auth: dict, org: str, repo_name: str, ag
     providers = {pname: (profile, await credentials(profile)) for pname, profile in s["providers"].items()}
 
     name = s["sandbox_name"]
-    workdir = f"/workspace/{repo_name}"
+    workdir = f"{WORKSPACE}/{repo_name}"
     labels = {"managed-by": "tether-orchestrator", "session": s["session_id"], "user": re.sub(r"[^a-z0-9-]", "-", s["user_id"].lower())[:63]}
     if s.get("job"):
         labels["job"] = s["job"]["id"]
@@ -174,7 +192,7 @@ async def provision(s: dict, credential_auth: dict, org: str, repo_name: str, ag
         if exists:
             await openshell.set_policy(name, policy_file)
         else:
-            await openshell.create_sandbox(name, policy_file, list(providers), labels)
+            await openshell.create_sandbox(name, image, policy_file, list(providers), labels)
             rc, _, err = await openshell.exec(name, ["git", "clone", "--", f"https://github.com/{org}/{repo_name}.git", workdir])
             if rc != 0:
                 raise OpenShellError(f"git clone failed in sandbox: {err.strip()[-500:]}")
@@ -240,7 +258,7 @@ async def attach(ws: WebSocket, ticket: str, rows: int = 24, cols: int = 80):
 DEFAULT_LOCAL_AGENT = ["tether-agent"]
 # Outside the repository (/workspace/<repo>), so the agent cannot commit it. A repository with this
 # exact name would make the write fail (it is a directory), never land the task inside the repo.
-TASK_FILE = "/workspace/.tether-task"
+TASK_FILE = f"{WORKSPACE}/.tether-task"
 
 
 def local_agent_argv() -> list[str]:
@@ -297,6 +315,10 @@ async def start_job(job_id: str, trigger: str, user_token: str = "", device_id: 
                    json_body={"user_token": user_token, "device_id": device_id, "device_verified": device_verified, "agent": "local", "repo": "-",
                               "job_id": job_id, "trigger": trigger})
     try:
+        task_bytes = len(s["job"]["task"].encode())
+        if task_bytes > MAX_EXEC_STDIN_BYTES:
+            # The task reaches the sandbox through exec stdin, which OpenShell caps at 4 MiB.
+            raise HTTPException(422, f"job task is {task_bytes} bytes; the limit is {MAX_EXEC_STDIN_BYTES} bytes (4 MiB)")
         repo_name = repo_in_org(s["job"]["repo"], org)
         name, workdir, _ = await provision(s, service_headers(), org, repo_name, "local")
     except BaseException:

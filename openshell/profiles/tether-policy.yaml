@@ -1,5 +1,6 @@
 # Session token for the Permission MCP. Bound to the Policy API's /v1/ paths only.
-# REPLACE policy-api.company.internal with your Policy API host.
+# REPLACE policy-api.company.internal with your Policy API host (= PLATFORM_POLICY_API_HOST). Like tether-llm:
+# no `tls`/`allowed_ips`, to match the compiler's tether_policy_api rule on the same host:port.
 id: tether-policy
 display_name: Company Policy API
 category: other
@@ -18,4 +19,6 @@ endpoints:
     rules:
       - allow: {method: GET, path: "/v1/**"}
       - allow: {method: POST, path: "/v1/**"}
-binaries: [/usr/local/bin/python, /usr/local/bin/node]
+# Real paths only. The Permission MCP runs as a child of the agent (node), which matches as an ancestor;
+# /usr/local/bin/python is a symlink in python images and would never match.
+binaries: [/usr/local/bin/node]

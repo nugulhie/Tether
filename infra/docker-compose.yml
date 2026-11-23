@@ -87,6 +87,9 @@ services:
       # Local-LLM agent jobs (ADR 0001): run due jobs every JOB_SCHEDULER_SECONDS when JOB_SCHEDULER=1.
       JOB_SCHEDULER: ${JOB_SCHEDULER:-0}
       LOCAL_AGENT_COMMAND: ${LOCAL_AGENT_COMMAND:-}
+      # Digest-pinned sandbox images (name@sha256:...), also listed in the interceptor's ALLOWED_SANDBOX_IMAGES.
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-}
+      LOCAL_AGENT_IMAGE: ${LOCAL_AGENT_IMAGE:-}
     ports: ["8083:8083"]
     depends_on: [policy-api, credential-broker]
   gateway-interceptor:

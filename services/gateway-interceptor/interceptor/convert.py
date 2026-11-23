@@ -105,4 +105,14 @@ def to_json(msg) -> dict:
 
 
 def policy_from_json(d) -> sandbox_pb2.SandboxPolicy:
-    return json_format.ParseDict(d or {}, sandbox_pb2.SandboxPolicy())  # unknown fields raise
+    """Gateway protobuf JSON -> SandboxPolicy, for comparison with the issued policy.
+
+    Fields the vendored OpenShell v0.1.9 schema does not know still raise (ParseError): a field we cannot
+    see could widen the policy, so such a policy is never accepted. Known fields that are gateway-derived
+    metadata rather than policy are cleared: `NetworkEndpoint.token_grant_owner` is stamped by the gateway
+    from the provider record or global policy, and OpenShell ignores user-authored values."""
+    msg = json_format.ParseDict(d or {}, sandbox_pb2.SandboxPolicy())
+    for rule in msg.network_policies.values():
+        for e in rule.endpoints:
+            e.ClearField("token_grant_owner")
+    return msg
