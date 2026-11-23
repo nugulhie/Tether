@@ -288,6 +288,7 @@ sequenceDiagram
   - 샌드박스 이미지: Claude Code 관리 설정(`allowedProviders: ["customEndpoint"]`), Codex 게이트웨이 설정, git 인증 설정
 - **MDM:** 시범 Mac 검증 후 Claude Code 프로필과 런처 pkg 배포
 - **GitHub:** 브랜치 보호, CODEOWNERS 팀 지정, CI 시크릿, GitHub App 생성과 설치
+- **Staging:** 단일 GPU 서버 구성 절차는 [infra/staging/README.md](../infra/staging/README.md)
 - **GPU 서버:** `infra/gpu/network/config.yaml`의 실제 주소와 PKI, 서명 키 생성(키 세레모니), 본문 파기 CronJob 배포
 - **오케스트레이터 다중 인스턴스:** 지금은 티켓과 터미널 상태를 메모리에 두므로 인스턴스를 하나만 띄워야 합니다.
 
