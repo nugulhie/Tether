@@ -11,3 +11,4 @@ dist/
 agent-launcher/build/
 services/gateway-interceptor/interceptor/gen/
 infra/mdm/out/
+.env

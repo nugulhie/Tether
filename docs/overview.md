@@ -298,7 +298,7 @@ sequenceDiagram
 ```bash
 make test                              # 전체 테스트 (proto 코드 생성 포함)
 make mdm                               # 노트북·샌드박스 Claude Code 관리 설정 생성
-cd infra && docker compose up --build  # postgres + 서비스 6개 (AUTH_MODE=dev)
+make up                                # postgres + 서비스 6개 (AUTH_MODE=dev). 처음 실행하면 infra/.env에 개발용 암호화 키를 새로 만듦
 
 make launcher
 export TETHER_TOKEN=dev:$USER TETHER_ORCHESTRATOR=http://localhost:8083

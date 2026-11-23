@@ -1,5 +1,8 @@
-up:
+up: dev-env
 	cd infra && docker compose up --build
+# infra/.env holds per-checkout development secrets (never committed). Created once, never overwritten.
+dev-env:
+	@test -f infra/.env || { umask 077; printf 'CONTENT_ENCRYPTION_KEY=%s\n' "$$(python3 -c 'import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode())')" > infra/.env; echo "created infra/.env with a new development CONTENT_ENCRYPTION_KEY"; }
 down:
 	cd infra && docker compose down
 launcher:

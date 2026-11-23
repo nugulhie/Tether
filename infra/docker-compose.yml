@@ -34,7 +34,7 @@ services:
       PLATFORM_LOCAL_INFERENCE_HOSTS: ${PLATFORM_LOCAL_INFERENCE_HOSTS:-}
       # Encrypts stored prompts and responses. Without it every model request is refused.
       # Development key only: production supplies its own (Fernet, 32 url-safe base64 bytes).
-      CONTENT_ENCRYPTION_KEY: ${CONTENT_ENCRYPTION_KEY:-vXvXtOM1DdHbmIlnQHCOmvrFyKzEHqBZKd6MwuEdctY=}
+      CONTENT_ENCRYPTION_KEY: "${CONTENT_ENCRYPTION_KEY:?run make dev-env to create infra/.env}"
       GUARDRAIL_BYPASS_MAX_SECONDS: ${GUARDRAIL_BYPASS_MAX_SECONDS:-14400}
       # Production: ADMIN_GROUPS, and DEVICE_ID_HEADER behind the mTLS proxy.
       # Dev only: publish ../policies as an unsigned bundle on startup. Production loads

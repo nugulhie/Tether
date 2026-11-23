@@ -17,7 +17,7 @@ Laptops (MDM): Claude Code pinned to the LLM gateway
 ## Quick start
 
 ```bash
-cd infra && docker compose up --build
+make up    # first run creates infra/.env with a fresh development encryption key
 ```
 
 Then install OpenShell using NVIDIA's official installer and verify `openshell --help`.

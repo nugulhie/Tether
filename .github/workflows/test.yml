@@ -1,0 +1,24 @@
+# Full test suite (`make test`) on every pull request and on main.
+# Make "test" a required status check on main (Settings → Branches).
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install OpenSSH server (sshd -T checks in infra/gpu/network)
+        run: sudo apt-get update -q && sudo apt-get install -y -q openssh-server
+      - run: make test
+      - name: Generated GPU network configs are up to date
+        run: make gpu-network && git diff --exit-code infra/gpu/network/out
