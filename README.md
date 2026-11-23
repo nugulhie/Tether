@@ -65,3 +65,7 @@ make policy-validate
 ```
 
 Schema changes are Alembic migrations in `services/policy-api/app/migrations`. They run on startup unless `MIGRATE_ON_STARTUP=0`.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
