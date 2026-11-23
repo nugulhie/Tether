@@ -17,14 +17,16 @@ class OpenShell:
     def __init__(self, binary: str = "openshell"):
         self.binary = binary
 
-    async def run(self, *args: str, env: dict | None = None, check: bool = True) -> tuple[int, str, str]:
+    async def run(self, *args: str, env: dict | None = None, check: bool = True, input: bytes | None = None) -> tuple[int, str, str]:
+        # stdin is never the orchestrator's own: either the given bytes or nothing.
         try:
             proc = await asyncio.create_subprocess_exec(self.binary, *args, env={**os.environ, **(env or {})},
+                                                        stdin=asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL,
                                                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         except OSError as e:
             raise OpenShellError(f"cannot run {self.binary}: {e}")
         try:
-            out, err = await proc.communicate()
+            out, err = await proc.communicate(input)
         except asyncio.CancelledError:
             # e.g. a job run hit its runtime limit: do not leave the CLI process behind.
             proc.kill()
@@ -57,10 +59,19 @@ class OpenShell:
         if rc != 0:
             raise OpenShellError(f"network policy rejected for {name}: {err.strip()}")
 
-    async def exec(self, name: str, argv: list[str], workdir: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
-        # env here is non-secret configuration only (base URLs, the approved task); secrets come from providers.
+    async def exec(self, name: str, argv: list[str], workdir: str | None = None, env: dict[str, str] | None = None,
+                   input: bytes | None = None) -> tuple[int, str, str]:
+        # env here is non-secret configuration only (base URLs, file paths); it is visible in process
+        # listings. Secrets come from providers; anything else sensitive goes through stdin (`input`).
         return await self.run("sandbox", "exec", "-n", name, "--no-tty", *(["--workdir", workdir] if workdir else []),
-                              *[a for k, v in (env or {}).items() for a in ("--env", f"{k}={v}")], "--", *argv, check=False)
+                              *[a for k, v in (env or {}).items() for a in ("--env", f"{k}={v}")], "--", *argv, check=False, input=input)
+
+    async def write_file(self, name: str, path: str, data: bytes) -> None:
+        """Write `data` to `path` inside the sandbox via stdin, so the content never appears in argv.
+        The path is a positional argument to a fixed script, never interpolated into it."""
+        rc, _, err = await self.exec(name, ["sh", "-c", 'umask 077 && mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', "sh", path], input=data)
+        if rc != 0:
+            raise OpenShellError(f"writing {path} in sandbox {name} failed ({rc}): {err.strip()[-500:]}")
 
     async def delete_sandboxes(self, names: list[str]):
         if names:

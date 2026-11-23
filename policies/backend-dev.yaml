@@ -33,9 +33,10 @@ llm:
   openai: {models: ["gpt-5*"]}
   # Self-hosted models on company GPU servers, reached only through the LLM gateway.
   # local: {models: ["company-coder-*"]}
-# Only agent_binaries may reach the LLM gateway. Local-LLM agent jobs need their binary here, e.g.
-# agent_binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/python, /usr/local/bin/company-local-agent]
   max_requests_per_minute: 120
+# Only agent_binaries may reach the LLM gateway. Local-LLM agent jobs need their binary here, e.g. (top-level key;
+# company-local-agent is the image infra/sandbox-images/local-agent):
+# agent_binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/python, /usr/local/bin/company-local-agent]
 # Prompt/response guardrails, enforced inline by the LLM gateway for every provider.
 # A guardrail error always denies the request (on_error: deny); only an administrator's
 # time-limited, audited bypass (POST /v1/admin/guardrails/bypass) lifts that.

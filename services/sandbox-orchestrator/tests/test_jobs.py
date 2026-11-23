@@ -40,8 +40,14 @@ class JobWorld(World):
             return httpx.Response(200, json={"token": "ghs_SECRET", "expires_at": "x"})
         return super().handle(req)
 
+    def execs(self):
+        return [c for c in self.calls() if c["argv"][:2] == ["sandbox", "exec"]]
+
+    def task_writes(self):
+        return [c for c in self.execs() if c["argv"][c["argv"].index("--") + 1:][:2] == ["sh", "-c"]]
+
     def agent_runs(self):
-        return [c["argv"] for c in self.calls() if c["argv"][:2] == ["sandbox", "exec"] and "clone" not in c["argv"]]
+        return [c["argv"] for c in self.execs() if "clone" not in c["argv"] and c not in self.task_writes()]
 
 
 def start(trigger="manual", token="dev:kim"):
@@ -64,8 +70,16 @@ def test_manual_run_executes_the_approved_task_and_tears_down(monkeypatch, tmp_p
     assert "--no-tty" in run and run[-1] == "company-local-agent"
     envs = dict(run[i + 1].split("=", 1) for i, a in enumerate(run) if a == "--env")
     assert envs["OPENAI_BASE_URL"] == "https://llm.company.internal/local/v1"
-    assert envs["COMPANY_AGENT_TASK"] == JOB["task"] and envs["COMPANY_AGENT_MODEL"] == "company-coder-32b"
-    assert "ghs_SECRET" not in json.dumps(run) and "ast_SECRET" not in json.dumps(run)
+    assert envs["COMPANY_AGENT_MODEL"] == "company-coder-32b" and envs["COMPANY_AGENT_JOB"] == "job-1"
+    # The task reaches the sandbox through stdin into a file; only the file's path is in argv.
+    assert envs["COMPANY_AGENT_TASK_FILE"] == o.TASK_FILE and "COMPANY_AGENT_TASK" not in envs
+    [write] = w.task_writes()
+    assert write["stdin"] == JOB["task"] and write["argv"][-1] == o.TASK_FILE and "--env" not in write["argv"]
+    execs = [c["argv"] for c in w.execs()]
+    assert execs.index(write["argv"]) < execs.index(run)
+    all_argv = json.dumps([c["argv"] for c in w.calls()])
+    assert JOB["task"] not in all_argv and "Update dependencies" not in all_argv
+    assert "ghs_SECRET" not in all_argv and "ast_SECRET" not in all_argv
     assert ["sandbox", "delete", "agent-job-job-1-abc-def"] in [c["argv"] for c in w.calls()]
     assert w.ended == ["sid-1"] and o.state.runs == {}
     exit_event = next(a for a in w.audits if a["event_type"] == "agent.exit")
@@ -91,6 +105,15 @@ def test_failed_run_is_recorded(monkeypatch, tmp_path):
     start()
     exit_event = next(a for a in w.audits if a["event_type"] == "agent.exit")
     assert exit_event["data"]["returncode"] == 7 and exit_event["success"] is False
+
+
+def test_task_delivery_failure_fails_the_run_without_starting_the_agent(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_WRITE_RC", "1")
+    start()
+    exit_event = next(a for a in w.audits if a["event_type"] == "agent.exit")
+    assert exit_event["success"] is False and exit_event["data"]["returncode"] is None and "writing" in exit_event["data"]["error"]
+    assert w.agent_runs() == [] and w.ended == ["sid-1"] and any(c["argv"][:2] == ["sandbox", "delete"] for c in w.calls())
 
 
 def test_job_repo_outside_org_ends_the_session(monkeypatch, tmp_path):

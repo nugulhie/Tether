@@ -23,4 +23,5 @@ endpoints:
     protocol: rest
     enforcement: enforce
     access: read-write
-binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node]
+# company-local-agent: the local-LLM job agent (local-agent/, image infra/sandbox-images/local-agent).
+binaries: [/usr/local/bin/claude, /usr/local/bin/codex, /usr/local/bin/node, /usr/local/bin/company-local-agent]

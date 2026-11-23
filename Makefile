@@ -18,7 +18,12 @@ test: gen
 	cd infra/github && uv run -q --no-project --python 3.13 --with pytest --with httpx pytest -q -p no:warnings tests
 	cd agent-launcher && uv run -q --no-project --python 3.13 --with pytest --with httpx --with click --with websockets pytest -q -p no:warnings tests
 	cd infra/mdm && uv run -q --no-project --python 3.13 --with pytest --with pyyaml pytest -q -p no:warnings tests
+	cd local-agent && uv run -q --no-project --python 3.13 --with pytest --with httpx pytest -q -p no:warnings tests
+	cd infra/gpu/network && uv run -q --no-project --python 3.13 --with pytest --with pyyaml pytest -q -p no:warnings tests
+	cd infra/gpu/signing && uv run -q --no-project --python 3.13 --with pytest --with cryptography pytest -q -p no:warnings tests
 launcher-pkg:
 	cd agent-launcher && ./packaging/build-macos.sh
+gpu-network:
+	cd infra/gpu/network && uv run -q --no-project --python 3.13 --with pyyaml python generate.py
 mdm:
 	cd infra/mdm && uv run -q --no-project --python 3.13 --with pyyaml python generate.py

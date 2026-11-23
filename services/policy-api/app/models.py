@@ -87,6 +87,21 @@ class LlmContent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ContentHold(Base):
+    # Legal hold on prompt/response content: while open (released_at is NULL), content in its
+    # scope is never purged, whatever its age. scope is user | session | job; value is the
+    # user id, session id or job id. Holds are released, never deleted.
+    __tablename__ = "content_holds"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(16))
+    value: Mapped[str] = mapped_column(String(256))
+    reason: Mapped[str] = mapped_column(String(500))
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    released_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class GuardrailBypass(Base):
     # Break-glass (ADR 0001, D4): an administrator lifts guardrails for a scope until expires_at.
     # Session checks, model allow-lists, network policy and content audit stay in force.

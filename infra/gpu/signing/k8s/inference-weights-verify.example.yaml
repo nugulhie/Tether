@@ -1,0 +1,36 @@
+# Example: weights verification on Kubernetes. The init container must succeed before vLLM starts;
+# both images are digests and are themselves covered by cluster-image-policy.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3-32b
+  namespace: gpu-inference
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: vllm-qwen3-32b}}
+  template:
+    metadata:
+      labels: {app: vllm-qwen3-32b}
+    spec:
+      automountServiceAccountToken: false
+      initContainers:
+        - name: verify-weights
+          image: registry.company.internal/gpu/modelsign@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          args: [verify, --dir, /models, --keys, /etc/company/signing/model-keys,
+                 --expect-model, qwen3-32b, --expect-version, "2026-11-01"]
+          volumeMounts:
+            - {name: models, mountPath: /models, readOnly: true}
+            - {name: model-keys, mountPath: /etc/company/signing/model-keys, readOnly: true}
+      containers:
+        - name: vllm
+          image: registry.company.internal/gpu/vllm@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          args: [--model, /models, --load-format, safetensors, --served-model-name, qwen3-32b]
+          volumeMounts:
+            - {name: models, mountPath: /models, readOnly: true}
+          resources:
+            limits: {nvidia.com/gpu: 1}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: qwen3-32b-2026-11-01, readOnly: true}
+        - name: model-keys
+          configMap: {name: model-signing-keys}   # <key_id>.pub entries, from infra/gpu/signing/keys/model

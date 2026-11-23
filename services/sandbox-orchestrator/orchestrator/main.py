@@ -238,10 +238,13 @@ async def attach(ws: WebSocket, ticket: str, rows: int = 24, cols: int = 80):
 # --- local-LLM agent jobs (ADR 0001, D1) ------------------------------------------------
 
 DEFAULT_LOCAL_AGENT = ["company-local-agent"]
+# Outside the repository (/workspace/<repo>), so the agent cannot commit it. A repository with this
+# exact name would make the write fail (it is a directory), never land the task inside the repo.
+TASK_FILE = "/workspace/.company-agent-task"
 
 
 def local_agent_argv() -> list[str]:
-    # JSON list, e.g. ["company-local-agent", "--non-interactive"]; the agent reads its task from the env.
+    # JSON list, e.g. ["company-local-agent", "--non-interactive"]; the agent reads its task from COMPANY_AGENT_TASK_FILE.
     raw = env("LOCAL_AGENT_COMMAND")
     return json.loads(raw) if raw else DEFAULT_LOCAL_AGENT
 
@@ -256,12 +259,18 @@ async def end_session(s: dict):
 async def run_job(s: dict, name: str, workdir: str):
     """Run the approved task once, non-interactively, then delete the sandbox and end the session."""
     job = s["job"]
+    # The task goes in through stdin to a file, never argv/--env: those show up in process listings
+    # on the orchestrator host and in the sandbox. Only its path is passed to the agent.
     agent_env = {"OPENAI_BASE_URL": f"{env('LLM_GATEWAY_URL')}/local/v1", "COMPANY_POLICY_API": env("POLICY_API_PUBLIC_URL"),
-                 "COMPANY_AGENT_MODEL": job["model"], "COMPANY_AGENT_TASK": job["task"], "COMPANY_AGENT_JOB": job["id"]}
+                 "COMPANY_AGENT_MODEL": job["model"], "COMPANY_AGENT_TASK_FILE": TASK_FILE, "COMPANY_AGENT_JOB": job["id"]}
     result = {"sandbox_name": name, "job_id": job["id"], "trigger": job["trigger"], "triggered_by": job["triggered_by"],
               "returncode": None, "timed_out": False}
+
+    async def execute():
+        await openshell.write_file(name, TASK_FILE, job["task"].encode())
+        return await openshell.exec(name, local_agent_argv(), workdir, env=agent_env)
     try:
-        rc, _, _ = await asyncio.wait_for(openshell.exec(name, local_agent_argv(), workdir, env=agent_env), timeout=job["max_runtime_seconds"])
+        rc, _, _ = await asyncio.wait_for(execute(), timeout=job["max_runtime_seconds"])
         result["returncode"] = rc
     except asyncio.TimeoutError:
         result["timed_out"] = True

@@ -1,0 +1,15 @@
+[project]
+name = "company-local-agent"
+version = "0.1.0"
+description = "Non-interactive local-LLM agent for administrator-approved jobs (ADR 0001, D1)"
+requires-python = ">=3.12"
+dependencies = ["httpx>=0.28"]
+[project.scripts]
+company-local-agent = "company_local_agent.agent:run"
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools]
+packages = ["company_local_agent"]
+[tool.pytest.ini_options]
+pythonpath = ["."]

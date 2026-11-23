@@ -66,13 +66,16 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 | 구성요소 | 경로 | 역할 | 상태 |
 |---|---|---|---|
 | **런처** | `agent-launcher/` | OIDC 로그인(device flow), 실행 요청, WebSocket 터미널. MDM 관리 설정 우선. macOS 서명/패키징 스크립트 | 구현, 테스트 17 |
-| **Policy API** | `services/policy-api/` | 아래 표 참고 | 구현, 테스트 106 |
-| **정책 컴파일러** | `services/policy-compiler/` | 회사 정책을 OpenShell 정책으로 변환, 검증, 번들 서명(Ed25519) CLI | 구현, 테스트 73 |
-| **샌드박스 오케스트레이터** | `services/sandbox-orchestrator/` | gateway 자격 유일 보유. 세션, 자격증명, provider, 샌드박스 생성, 레포 클론, 터미널 중계, 킬 스위치. 관리자가 승인한 로컬 에이전트 job 실행(사람·스케줄) | 구현, 테스트 26 |
+| **Policy API** | `services/policy-api/` | 아래 표 참고 | 구현, 테스트 163 |
+| **정책 컴파일러** | `services/policy-compiler/` | 회사 정책을 OpenShell 정책으로 변환, 검증, 번들 서명(Ed25519) CLI | 구현, 테스트 87 |
+| **샌드박스 오케스트레이터** | `services/sandbox-orchestrator/` | gateway 자격 유일 보유. 세션, 자격증명, provider, 샌드박스 생성, 레포 클론, 터미널 중계, 킬 스위치. 관리자가 승인한 로컬 에이전트 job 실행(사람·스케줄), 지시문은 파일로 전달 | 구현, 테스트 27 |
 | **Gateway Interceptor** | `services/gateway-interceptor/` | OpenShell gRPC 확장. 발급된 이름과 정책만 허용, 정책 확대와 우회 경로 차단, 회사 프로필 공급 | 구현, 테스트 61 |
 | **LLM 게이트웨이** | `services/llm-gateway/` | 모델로 가는 유일한 경로. 세션 토큰 + egress IP 확인, 회사 키 사용, 모델 허용 목록, 사용량 감사. 자체 GPU 추론 서버(`local`, mTLS), 가드레일(fail-closed, break-glass), 프롬프트·응답 본문 감사 ([ADR 0001](adr/0001-local-llm-agent-control.md)) | 구현, 테스트 74 |
 | **Credential Broker** | `services/credential-broker/` | STS(SourceIdentity, 세션 태그), GitHub App 토큰(레포 1개), 발급 기록(암호화), 회수 | 구현, 테스트 28 |
 | **Permission MCP** | `services/permission-mcp/` | 샌드박스 안 에이전트용 권한 질의 도구(세션 토큰 기반) | 구현 |
+| **로컬 에이전트** | `local-agent/`, `infra/sandbox-images/local-agent/` | job 샌드박스에서 도는 OpenAI 호환 도구 호출 루프(파일·셸 도구, 작업 디렉터리 밖 접근 거부). 단일 실행 파일과 샌드박스 이미지 | 구현, 테스트 22 |
+| **GPU 네트워크·SSH 강제** | `infra/gpu/network/` | 단일 설정에서 nftables, envoy mTLS 프록시, K8s NetworkPolicy, sshd/bastion 설정 생성. 양방향 검증 도구(`verify.py`) | 구현, 테스트 71 |
+| **가중치·이미지 서명** | `infra/gpu/signing/` | 가중치 매니페스트 Ed25519 서명·검증(safetensors만), cosign 이미지 검증, systemd `ExecStartPre`·policy-controller | 구현, 테스트 41 |
 | **노트북 통제 (MDM)** | `infra/mdm/` | Claude Code 관리 설정(회사 게이트웨이 고정) 생성기. 노트북용 MDM 프로필과 파일, 샌드박스 이미지용 파일. Apple entitlement 불필요 | 구현, 테스트 6 |
 | **정책 원본 (GitOps)** | `policies/`, `.github/` | 정책 YAML, CI(검증 → 서명 → 게시), CODEOWNERS | 구현 |
 | **OpenShell 설정** | `openshell/profiles/`, `infra/openshell/` | 목적지에 묶인 provider 프로필 3종, gateway interceptor TOML | 작성 |
@@ -83,7 +86,8 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 - OIDC 인증, 세션 생성(오케스트레이터 전용), 권한 판정
 - 정책 번들 게시, 정책 선택, 감사 로그(OCSF)
 - 킬 스위치, SIEM용 조회 API
-- interceptor와 LLM 게이트웨이용 조회 API, Alembic 마이그레이션 5개(0005에서 기기 테이블 삭제)
+- interceptor와 LLM 게이트웨이용 조회 API, Alembic 마이그레이션 9개(0005에서 기기 테이블 삭제)
+- 프롬프트·응답 본문 보존(`CONTENT_RETENTION_DAYS`, 기본 90일)과 파기(`python -m app.purge`), 법적 보존(hold)
 
 **노트북 통제(MDM)가 하는 일**
 - Claude Code가 회사 LLM 게이트웨이 외에는 연결하지 못하게 고정합니다. 게이트웨이는 샌드박스에서 온 요청만 받으므로, 노트북의 Claude Code는 개인 로그인을 포함해 동작하지 않습니다.
@@ -258,16 +262,18 @@ sequenceDiagram
 
 | 구분 | 내용 |
 |---|---|
-| 단위·통합 테스트 | `make test`: Python 438개(컴파일러 87, Policy API 132, Broker 28, LLM Gateway 74, Orchestrator 26, Interceptor 61, GitHub 동기화 7, 런처 17, MDM 생성기 6) |
+| 단위·통합 테스트 | `make test`: Python 604개(컴파일러 87, Policy API 163, Broker 28, LLM Gateway 74, Orchestrator 27, Interceptor 61, GitHub 동기화 7, 런처 17, MDM 생성기 6, 로컬 에이전트 22, GPU 네트워크 71, 서명 41) |
 | 실제 프로세스 E2E | 실제 TTY 런처 → WebSocket → 서버 PTY → (가짜) OpenShell exec, 입력 중계와 종료 코드 |
 | 컨테이너 E2E | 마이그레이션(기존 볼륨, 0001→0005), 오케스트레이터 전용 세션, LLM 게이트웨이(개인 토큰과 미허용 모델 거부, Anthropic까지 중계), interceptor gRPC 공격 시나리오, 킬 스위치, SIEM 조회 |
-| 빌드 | Docker 이미지 6종, 런처 PyInstaller(ad-hoc 서명)와 pkg, MDM 프로필 형식 검사(`plutil`) |
+| GPU 경계 E2E | Docker에서 생성한 envoy 설정과 nftables 적용 후 `verify.py`: 샌드박스 쪽 6/6, gateway 쪽 9/9 통과. `sshd -T`로 GPU 호스트·bastion 설정 확인 |
+| 빌드 | 로컬 에이전트 이미지(arm64)와 가짜 gateway 대상 실행, Docker 이미지 6종, 런처 PyInstaller(ad-hoc 서명)와 pkg, MDM 프로필 형식 검사(`plutil`) |
 
 **검증하지 못한 부분** (실제 환경이 필요함)
 - OpenShell gateway와 CLI 실제 연동: provider, policy set, exec, interceptor 정규화 동작, 프로필 문법 검사(`profile lint`), github-org 프로필에서의 git 인증 방식
 - MDM: 실제 Mac에 Claude Code 프로필 적용, Claude Code `/status` 확인
 - 실제 IdP, AWS STS와 IAM, GitHub App
-- GitHub Actions 정책 파이프라인(원격 저장소 없음)
+- GitHub Actions 정책 파이프라인
+- GPU 서버: 실제 호스트의 nftables·tlog·auditd, 실제 cosign과 policy-controller, `openshell sandbox exec`의 stdin 전달(로컬 에이전트 지시문 파일)
 
 ---
 
@@ -282,6 +288,7 @@ sequenceDiagram
   - 샌드박스 이미지: Claude Code 관리 설정(`allowedProviders: ["customEndpoint"]`), Codex 게이트웨이 설정, git 인증 설정
 - **MDM:** 시범 Mac 검증 후 Claude Code 프로필과 런처 pkg 배포
 - **GitHub:** 브랜치 보호, CODEOWNERS 팀 지정, CI 시크릿, GitHub App 생성과 설치
+- **GPU 서버:** `infra/gpu/network/config.yaml`의 실제 주소와 PKI, 서명 키 생성(키 세레모니), 본문 파기 CronJob 배포
 - **오케스트레이터 다중 인스턴스:** 지금은 티켓과 터미널 상태를 메모리에 두므로 인스턴스를 하나만 띄워야 합니다.
 
 ---

@@ -34,6 +34,13 @@ Pull OCSF events with `GET /v1/audit/events?after_id=...` (SIEM token or admin),
   curl -H "Authorization: Bearer $ADMIN_ID_TOKEN" "https://policy-api.company.internal/v1/audit/content?request_id=<id>"
   curl -H "Authorization: Bearer $ADMIN_ID_TOKEN" "https://policy-api.company.internal/v1/audit/content/<content_id>?reason=INC-42"
   ```
+- **Retention:** bodies are deleted after `CONTENT_RETENTION_DAYS` (90). At the start of an incident, place a legal hold first so the evidence survives the next purge, and release it when the case closes:
+  ```bash
+  curl -X POST -H "Authorization: Bearer $ADMIN_ID_TOKEN" -H 'Content-Type: application/json' \
+    -d '{"scope":"user","value":"kim","reason":"INC-42"}' https://policy-api.company.internal/v1/admin/audit/content/holds
+  curl -X DELETE -H "Authorization: Bearer $ADMIN_ID_TOKEN" "https://policy-api.company.internal/v1/admin/audit/content/holds/<hold_id>?reason=INC-42%20closed"
+  ```
+  Scopes are `user`, `session` and `job` (scheduled runs belong to `job:<id>`, so hold them by job). Purged content returns 404; its `llm.content` event (id, hash, size) remains.
 - `guardrail.block` / `guardrail.error`: what was blocked (rule names, direction), or that a guardrail failed and the request was refused.
 - `policy.publish` and `session.revoke`: control-plane changes, including `rollbacks`.
 
@@ -67,4 +74,6 @@ curl -X DELETE "https://policy-api.company.internal/v1/admin/guardrails/bypass/<
 - `guardrail.error` bursts (guardrail outage) and `guardrail.block` bursts for one session or user.
 - `llm.request` with `content_stored: false` (a response could not be stored).
 - `audit.content.read` outside an open incident.
+- `audit.content.purge` missing for more than a day (the purge job stopped), or with `status_id=2`; `audit.content.hold.end` without a closed incident.
+- `model.verify` / `image.verify` with `result` other than success (logged by the GPU hosts, `infra/gpu/signing/`), and nftables drop logs from GPU hosts (`infra/gpu/network/`).
 - `agent.job.approve` where `decided_by` and the requester share a team you consider one person, and `agent.exit` with `timed_out: true` repeatedly for one job.

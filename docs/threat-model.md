@@ -34,8 +34,8 @@
 | G-3 | A local agent exfiltrates data through tool calls or its output | OpenShell L7 policy, output guardrails, prompt/response content audit | Yes |
 | G-4 | Make the guardrail fail so requests go through unchecked | Fail-closed: a guardrail error refuses the request or ends the stream | Yes |
 | G-5 | Leave a break-glass bypass open, or abuse it | Mandatory scope and TTL (max `GUARDRAIL_BYPASS_MAX_SECONDS`), expiry enforced by the gateway clock, start/end events, SIEM alert | Yes |
-| G-6 | Load tampered weights or an inference image (pickle RCE) | Signed weights (safetensors only) and signed images; infrastructure, not yet automated | Not yet |
-| G-7 | Change the serving configuration over SSH on a GPU server | Bastion and administrators only, audited; infrastructure | Not yet |
+| G-6 | Load tampered weights or an inference image (pickle RCE) | Ed25519-signed weight manifests (safetensors only, re-hashed at start) and cosign-verified image digests, before the engine starts (`infra/gpu/signing/`); not bypassable by break-glass | Yes, once deployed |
+| G-7 | Change the serving configuration over SSH on a GPU server | SSH only from the bastion, admin group only, tlog session recording and auditd (`infra/gpu/network/`) | Yes, once deployed |
 | G-9 | Run an unapproved local agent, or change an approved job's task | Local agents run only as jobs; the Policy API issues a session only for an approved job, approved by an administrator other than its owner; jobs are immutable (a change is a new job) | Yes |
 | G-10 | Stolen orchestrator credentials run a job continuously or as someone else | The Policy API enforces the job's interval, one run at a time, and owner-or-admin for manual runs; the orchestrator can read only job sessions | Yes |
 | G-8 | Run a model request without it being on record | The prompt is stored (encrypted) before it is sent upstream; if storage fails the request is refused | Yes |

@@ -1,0 +1,29 @@
+# Sigstore policy-controller (https://docs.sigstore.dev/policy-controller/overview/).
+# Every image in the gpu-inference namespace must carry a cosign signature from a company image key.
+# Install policy-controller with no-match-policy=deny and the webhook failurePolicy=Fail, so that an
+# unmatched image or an unavailable webhook is a refusal, not a pass.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-inference
+  labels:
+    policy.sigstore.dev/include: "true"
+---
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: gpu-inference-company-signed
+spec:
+  mode: enforce
+  images:
+    - glob: "**"   # every image in opted-in namespaces, including init containers (modelsign)
+  # An image passes if any authority verifies it. Rotation: add the new key, re-sign, then remove the old.
+  # Key-based and offline, matching verify-image (no public Rekor from the GPU network).
+  authorities:
+    - name: image-2026a
+      key:
+        hashAlgorithm: sha256
+        data: |
+          -----BEGIN PUBLIC KEY-----
+          REPLACE-WITH-infra/gpu/signing/keys/image/image-2026a.pub
+          -----END PUBLIC KEY-----

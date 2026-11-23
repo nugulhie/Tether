@@ -1,22 +1,24 @@
+import asyncio
 import hashlib
+import logging
 import os
 import posixpath
 import re
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import and_, delete, exists, func, or_, select
 from policy_compiler import PolicyError, compile_policy, policy_hash, static_part
 from policy_compiler import bundle as bundles
 from . import ocsf
 from .auth import Principal, SESSION_TOKEN_PREFIX, bearer, env, hash_token, is_admin, new_session_token, service_principal, verified_device, verify_user_token
 from .db import Session, migrate
-from .models import AgentJob, AgentSession, AuditEvent, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
+from .models import AgentJob, AgentSession, AuditEvent, ContentHold, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
 
 WORKSPACE="/workspace"
 Id=Field(min_length=1,max_length=128)
@@ -131,10 +133,17 @@ def load_dev_policies():
 
 @asynccontextmanager
 async def lifespan(app):
+    # A bad retention setting stops startup rather than being guessed at (see content_retention_days).
+    content_retention_days(); interval=content_purge_interval()
     # Production can set MIGRATE_ON_STARTUP=0 and run `alembic upgrade head` as a release step.
     if env("MIGRATE_ON_STARTUP","1")=="1": migrate()
     load_dev_policies()
-    yield
+    task=asyncio.create_task(purge_loop(interval)) if interval else None
+    try: yield
+    finally:
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError): await task
 
 app=FastAPI(title="Company Agent Policy API",lifespan=lifespan)
 
@@ -414,7 +423,9 @@ def read_content(content_id:str,reason:str=Query(min_length=1,max_length=500),p:
     f=content_cipher()
     with Session() as db:
         row=db.get(LlmContent,content_id)
-        if not row: raise HTTPException(404,"content not found")
+        # Purged content is gone, like content that never existed: 404 either way. The llm.content
+        # event (id, hash, size) and the audit.content.purge event remain.
+        if not row: raise HTTPException(404,"content not found (it may have been purged after the retention period)")
         try: text=f.decrypt(row.ciphertext).decode()
         except InvalidToken: raise HTTPException(500,"content cannot be decrypted with the configured key")
         record(db,"audit.content.read",p,source="policy-api",session_id=row.session_id,message=reason,
@@ -422,6 +433,130 @@ def read_content(content_id:str,reason:str=Query(min_length=1,max_length=500),p:
         db.commit()
         return {"content_id":row.id,"session_id":row.session_id,"request_id":row.request_id,"direction":row.direction,
                 "sha256":row.sha256,"truncated":row.truncated,"content":text}
+
+# --- content retention and legal hold (ADR 0001, D5) -------------------------------
+
+HOLD_SCOPES=("user","session","job")
+# Who purges when no administrator does: the CronJob CLI and the in-process loop.
+RETENTION_ACTOR=Principal(kind="service",user_id="content-retention")
+log=logging.getLogger("policy-api")
+
+def int_env(name,default,minimum):
+    raw=env(name,default).strip() or default
+    try: v=int(raw)
+    except ValueError: raise ValueError(f"{name} must be an integer, got {raw!r}") from None
+    if v<minimum: raise ValueError(f"{name} must be at least {minimum}, got {v}")
+    return v
+
+def content_retention_days():
+    """Days prompt/response bodies are kept (default 90). Values below 1 are a misconfiguration and
+    raise instead of being clamped or defaulted: 0 would destroy every body at the next purge, and
+    silently falling back to 90 would hide a setting that legal/privacy asked for."""
+    return int_env("CONTENT_RETENTION_DAYS","90",1)
+
+def content_purge_interval():
+    """Seconds between in-process purges; 0 (the default) leaves purging to the CronJob."""
+    return int_env("CONTENT_PURGE_INTERVAL_SECONDS","0",0)
+
+class HoldReq(BaseModel):
+    scope:str=Field(pattern="^(user|session|job)$"); value:str=Field(min_length=1,max_length=256); reason:str=Field(min_length=1,max_length=500)
+
+def hold_view(h):
+    return {"id":h.id,"scope":h.scope,"value":h.value,"reason":h.reason,"created_by":h.created_by,"created_at":utc(h.created_at).isoformat(),
+            "released_by":h.released_by,"released_at":utc(h.released_at).isoformat() if h.released_at else None}
+
+def held():
+    """SQL condition: this llm_contents row is under an open hold. It is part of the DELETE itself,
+    so a hold committed before the statement runs wins even over a purge that already picked the row."""
+    is_open=ContentHold.released_at.is_(None)
+    by_session=exists().where(is_open,ContentHold.scope=="session",ContentHold.value==LlmContent.session_id).correlate(LlmContent)
+    by_owner=exists().where(is_open,AgentSession.id==LlmContent.session_id,or_(
+        and_(ContentHold.scope=="user",ContentHold.value==AgentSession.user_id),
+        and_(ContentHold.scope=="job",ContentHold.value==AgentSession.job_id))).correlate(LlmContent)
+    return or_(by_session,by_owner)
+
+def purge_contents(actor,*,trigger,dry_run=False,at=None,batch_size=None):
+    """Delete bodies older than CONTENT_RETENTION_DAYS that no open hold covers, in batches.
+
+    Age is compared in Python with utc(), not in SQL: SQLite stores timestamps as naive strings and
+    such comparisons were unreliable here before. Rows are scanned by primary key (keyset), metadata
+    columns only. Idempotent and safe to run concurrently: each batch deletes by id with the hold
+    check in the same statement, so a row is deleted once and counted by the run that deleted it.
+    Emits exactly one audit.content.purge event with counts only, also when the run fails."""
+    days=content_retention_days(); batch=batch_size or int_env("CONTENT_PURGE_BATCH_SIZE","500",1)
+    cutoff=(at or now())-timedelta(days=days)
+    # expired: past the cutoff; held: of those, under an open hold at scan time; deleted: by this run.
+    stats={"expired":0,"held":0,"deleted":0,"open_holds":0}; error=None
+    try:
+        with Session() as db:
+            holds={(h.scope,h.value) for h in db.scalars(select(ContentHold).where(ContentHold.released_at.is_(None)))}
+            stats["open_holds"]=len(holds); last=""
+            while True:
+                rows=db.execute(select(LlmContent.id,LlmContent.session_id,LlmContent.created_at,AgentSession.user_id,AgentSession.job_id)
+                                .outerjoin(AgentSession,AgentSession.id==LlmContent.session_id)
+                                .where(LlmContent.id>last).order_by(LlmContent.id).limit(batch)).all()
+                if not rows: break
+                last=rows[-1].id; doomed=[]
+                for r in rows:
+                    if utc(r.created_at)>=cutoff: continue
+                    stats["expired"]+=1
+                    if {("session",r.session_id),("user",r.user_id),("job",r.job_id)}&holds: stats["held"]+=1
+                    else: doomed.append(r.id)
+                if doomed and not dry_run:
+                    res=db.execute(delete(LlmContent).where(LlmContent.id.in_(doomed),~held()).execution_options(synchronize_session=False))
+                    stats["deleted"]+=res.rowcount; db.commit()
+    except Exception as e:
+        error=e; raise
+    finally:
+        # Expired, not held at scan time, and not deleted here: removed by a concurrent purge or held meanwhile.
+        stats["skipped_other"]=0 if dry_run else stats["expired"]-stats["held"]-stats["deleted"]
+        out={"trigger":trigger,"dry_run":dry_run,"retention_days":days,"cutoff":cutoff.isoformat(),**stats}
+        if dry_run: out["would_delete"]=stats["expired"]-stats["held"]
+        if error is not None: out["error"]=type(error).__name__
+        with Session() as db:
+            record(db,"audit.content.purge",actor,source="policy-api",success=error is None,
+                   message=f"{'dry run: ' if dry_run else ''}{out.get('would_delete',stats['deleted'])} content bodies past {days} days",data=out)
+            db.commit()
+    return out
+
+async def purge_loop(interval):
+    while True:
+        try: await asyncio.to_thread(purge_contents,RETENTION_ACTOR,trigger="schedule")
+        except Exception: log.exception("content purge failed")
+        await asyncio.sleep(interval)
+
+@app.post("/v1/admin/audit/content/purge")
+def purge_content(dry_run:bool=False,p:Principal=Depends(require("admin"))):
+    """Run the retention purge now. dry_run=true only counts. Normally run by `python -m app.purge`."""
+    return purge_contents(p,trigger="api",dry_run=dry_run)
+
+@app.post("/v1/admin/audit/content/holds")
+def start_hold(req:HoldReq,p:Principal=Depends(require("admin"))):
+    """Legal hold: content of this user, session or job is kept past retention until the hold is released."""
+    with Session() as db:
+        h=ContentHold(id=str(uuid.uuid4()),scope=req.scope,value=req.value,reason=req.reason,created_by=p.user_id,created_at=now())
+        db.add(h)
+        record(db,"audit.content.hold.start",p,source="policy-api",message=req.reason,data=hold_view(h))
+        db.commit()
+        return hold_view(h)
+
+@app.get("/v1/admin/audit/content/holds")
+def list_holds(include_released:bool=False,p:Principal=Depends(require("admin"))):
+    with Session() as db:
+        q=select(ContentHold).order_by(ContentHold.created_at)
+        if not include_released: q=q.where(ContentHold.released_at.is_(None))
+        return {"holds":[hold_view(h) for h in db.scalars(q.limit(1000))]}
+
+@app.delete("/v1/admin/audit/content/holds/{hold_id}")
+def release_hold(hold_id:str,reason:str=Query(min_length=1,max_length=500),p:Principal=Depends(require("admin"))):
+    """Release a hold. Its content becomes subject to the normal retention purge again."""
+    with Session() as db:
+        h=db.get(ContentHold,hold_id)
+        if not h or h.released_at: raise HTTPException(404,"no open hold with this id")
+        h.released_at,h.released_by=now(),p.user_id
+        record(db,"audit.content.hold.end",p,source="policy-api",message=reason,data={**hold_view(h),"release_reason":reason})
+        db.commit()
+        return hold_view(h)
 
 # --- local-agent jobs (ADR 0001, D1) -----------------------------------------------
 
