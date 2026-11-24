@@ -14,9 +14,12 @@ touch infra/.env
 add() { grep -qs "^$1=" infra/.env || echo "$1=$2" >> infra/.env; }
 add CONTENT_ENCRYPTION_KEY "$(fernet)"
 add BROKER_ENCRYPTION_KEY "$(fernet)"
-for t in CREDENTIAL_BROKER_TOKEN POLICY_PUBLISHER_TOKEN SIEM_TOKEN ORCHESTRATOR_TOKEN LLM_GATEWAY_TOKEN INTERCEPTOR_TOKEN; do
+for t in CREDENTIAL_BROKER_TOKEN POLICY_PUBLISHER_TOKEN SIEM_TOKEN ORCHESTRATOR_TOKEN LLM_GATEWAY_TOKEN INTERCEPTOR_TOKEN USER_TOKEN_KEY; do
   add "$t" "$(token)"
 done
+# The LAN address people connect to (client certificate required) and the administrators' certificate names.
+add TETHER_LAN_ADDRESS "$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+grep -qs '^TETHER_ADMIN_USERS=.' infra/.env || { echo "set TETHER_ADMIN_USERS=<your certificate name> in infra/.env" >&2; exit 1; }
 umask 022
 
 # Interceptor socket directory and gateway JWT public key (written by the gateway's generate-certs).
@@ -28,7 +31,7 @@ mkdir -p -m 700 "$TETHER_RUN_DIR"
 
 # TLS material from 60-tls.sh (run on the administrator's machine first).
 export TETHER_TLS_DIR=$HOME/.local/state/tether/tls
-for f in front.crt front.key inference.crt inference.key llm-gateway-client.crt llm-gateway-client.key service-ca.pem; do
+for f in front.crt front.key inference.crt inference.key llm-gateway-client.crt llm-gateway-client.key service-ca.pem user-ca.pem user-ca.crl; do
   test -r "$TETHER_TLS_DIR/$f" || { echo "missing $TETHER_TLS_DIR/$f (run infra/staging/60-tls.sh from the admin machine)" >&2; exit 1; }
 done
 export ENVOY_IMAGE=${ENVOY_IMAGE:-envoyproxy/envoy:v1.34.1@sha256:007da57c2c328a90bd4e6d99b70bd899132f1b4a9426ccafe25437cf84a60c14}

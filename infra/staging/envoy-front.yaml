@@ -1,14 +1,20 @@
-# TLS front for the single-host deployment (compose.staging.yml service `tls-front`, published on 127.0.0.1:443).
-# Sandboxes reach it as https://host.openshell.internal (OpenShell maps that name to host loopback), so the
-# policy compiler's LLM gateway and Policy API rules, both host.openshell.internal:443, land here:
-#   /v1/...   -> Policy API  (permission checks from the sandbox)
-#   other     -> LLM gateway (/anthropic, /openai, /local)
-# Certificate: front.crt from infra/staging/60-tls.sh (SAN host.openshell.internal, 127.0.0.1, server IP).
+# TLS front for the single-host deployment (compose.staging.yml service `tls-front`, fixed address 172.30.0.20).
+# Two listeners:
+#   sandbox (8443, published on 127.0.0.1:443): sandboxes reach it as https://host.openshell.internal (OpenShell
+#     maps that name to host loopback). The compiler's LLM gateway and Policy API rules land here:
+#       /v1/auth/  -> 404 (people only)    /v1/... -> Policy API    other -> LLM gateway
+#   people (9443, published on the server's LAN address :443): requires a client certificate from the user CA
+#     (minus the CRL). Forwards the certificate's subject and serial, overwriting anything the client sent:
+#       /v1/auth/token -> Policy API (exchanges the certificate for a short-lived token; trusts the subject
+#                         header only from this proxy's address, IDENTITY_PROXY_ADDRESSES)
+#       /v1/launch, /v1/attach (WebSocket), /v1/jobs/, /v1/admin/revoke -> orchestrator (device = serial)
+#       other /v1/... -> Policy API (admin API: jobs, holds, bypass, audit)
+# Certificates: infra/staging/60-tls.sh (front.crt SAN host.openshell.internal, 127.0.0.1, server IP).
 admin:
   address: {socket_address: {address: 127.0.0.1, port_value: 9901}}
 static_resources:
   listeners:
-  - name: front
+  - name: sandbox
     address: {socket_address: {address: 0.0.0.0, port_value: 8443}}
     filter_chains:
     - transport_socket:
@@ -25,7 +31,7 @@ static_resources:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-          stat_prefix: front
+          stat_prefix: sandbox
           codec_type: HTTP1
           use_remote_address: true
           normalize_path: true
@@ -34,15 +40,78 @@ static_resources:
           stream_idle_timeout: 300s
           common_http_protocol_options: {headers_with_underscores_action: REJECT_REQUEST}
           route_config:
-            name: front
+            name: sandbox
+            # A sandbox must never assert a person's identity.
+            request_headers_to_remove: [x-tether-client-subject, x-tether-client-serial]
             virtual_hosts:
-            - name: front
+            - name: sandbox
               domains: ['*']
               routes:
+              - match: {prefix: /v1/auth/}
+                direct_response: {status: 404}
               - match: {prefix: /v1/}
                 route: {cluster: policy_api, timeout: 30s}
               - match: {prefix: /}
                 route: {cluster: llm_gateway, timeout: 600s}
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config: {'@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router}
+  - name: people
+    address: {socket_address: {address: 0.0.0.0, port_value: 9443}}
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          '@type': type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          require_client_certificate: true
+          common_tls_context:
+            tls_params: {tls_minimum_protocol_version: TLSv1_2}
+            alpn_protocols: [http/1.1]
+            tls_certificates:
+            - certificate_chain: {filename: /etc/tether/tls/front.crt}
+              private_key: {filename: /etc/tether/tls/front.key}
+            validation_context:
+              trusted_ca: {filename: /etc/tether/tls/user-ca.pem}
+              crl: {filename: /etc/tether/tls/user-ca.crl}
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: people
+          codec_type: HTTP1
+          use_remote_address: true
+          normalize_path: true
+          merge_slashes: true
+          path_with_escaped_slashes_action: REJECT_REQUEST
+          stream_idle_timeout: 3600s          # interactive agent terminals
+          upgrade_configs: [{upgrade_type: websocket}]
+          common_http_protocol_options: {headers_with_underscores_action: REJECT_REQUEST}
+          route_config:
+            name: people
+            request_headers_to_remove: [x-tether-client-subject, x-tether-client-serial]
+            request_headers_to_add:
+            - header: {key: x-tether-client-subject, value: '%DOWNSTREAM_PEER_SUBJECT%'}
+              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+            - header: {key: x-tether-client-serial, value: '%DOWNSTREAM_PEER_SERIAL%'}
+              append_action: OVERWRITE_IF_EXISTS_OR_ADD
+            virtual_hosts:
+            - name: people
+              domains: ['*']
+              routes:
+              - match: {path: /v1/auth/token}
+                route: {cluster: policy_api, timeout: 30s}
+              - match: {path: /v1/launch}
+                route: {cluster: orchestrator, timeout: 600s}
+              - match: {path: /v1/attach}
+                route: {cluster: orchestrator, timeout: 0s}
+              - match: {path: /v1/admin/revoke}
+                route: {cluster: orchestrator, timeout: 120s}
+              - match: {prefix: /v1/jobs/}
+                route: {cluster: orchestrator, timeout: 600s}
+              - match: {prefix: /v1/}
+                route: {cluster: policy_api, timeout: 60s}
+              - match: {prefix: /}
+                direct_response: {status: 404}
           http_filters:
           - name: envoy.filters.http.router
             typed_config: {'@type': type.googleapis.com/envoy.extensions.filters.http.router.v3.Router}
@@ -59,3 +128,9 @@ static_resources:
     load_assignment:
       cluster_name: llm_gateway
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: llm-gateway, port_value: 8082}}}}]}]
+  - name: orchestrator
+    type: STRICT_DNS
+    connect_timeout: 5s
+    load_assignment:
+      cluster_name: orchestrator
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: sandbox-orchestrator, port_value: 8083}}}}]}]

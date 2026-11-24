@@ -10,6 +10,8 @@
 #   tether-pki.sh sign-server <csr> <san> [days]   e.g. "DNS:host.openshell.internal,IP:127.0.0.1"
 #   tether-pki.sh sign-client <csr> <san> [days]   service client certificate (e.g. the LLM gateway)
 #   tether-pki.sh user <name> [days]               person certificate -> $TETHER_PKI/users/<name>/
+#   tether-pki.sh revoke <name>                    revoke a person's certificate (then push the CRL: 60-tls.sh)
+#   tether-pki.sh crl                              print the user CA's current CRL (valid 365 days; 60-tls.sh re-pushes it)
 #   tether-pki.sh ca                               print the service CA certificate
 # Certificates go to stdout (sign-*) so the caller decides where they land.
 set -euo pipefail
@@ -58,6 +60,22 @@ case ${1:-} in
     "$OPENSSL" req -new -key "$d/key.pem" -subj "/O=Tether/CN=$name" -out "$d/req.csr"
     sign user-ca "$d/req.csr" clientAuth "" "$days" > "$d/cert.pem"; rm -f "$d/req.csr"
     echo "$d/cert.pem and $d/key.pem (valid $days days); give both to $name over a private channel" ;;
+  revoke)
+    name=${2:?name}; d="$PKI/users/$name"; [ -e "$d/cert.pem" ] || die "no certificate for $name"
+    serial=$("$OPENSSL" x509 -in "$d/cert.pem" -noout -serial | cut -d= -f2)
+    touch "$PKI/user-ca.revoked"; grep -qx "$serial" "$PKI/user-ca.revoked" || echo "$serial" >> "$PKI/user-ca.revoked"
+    mv "$d" "$PKI/users/.revoked-$name-$serial"
+    echo "revoked $name (serial $serial); push the CRL to the server now (60-tls.sh), and revoke the person's sessions" ;;
+  crl)
+    # openssl ca needs its database; rebuild a throwaway one from the revoked-serial list.
+    work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+    touch "$work/index.txt"
+    while read -r serial; do
+      [ -n "$serial" ] && printf 'R\t991231235959Z\t%s\t%s\tunknown\t/CN=revoked\n' "$(date -u +%y%m%d%H%M%SZ)" "$serial" >> "$work/index.txt"
+    done < <(cat "$PKI/user-ca.revoked" 2>/dev/null)
+    printf '[ca]\ndefault_ca=c\n[c]\ndatabase=%s/index.txt\ncrlnumber=%s/crlnumber\ndefault_md=sha256\ndefault_crl_days=365\n' "$work" "$work" > "$work/ca.cnf"
+    echo 01 > "$work/crlnumber"
+    "$OPENSSL" ca -gencrl -config "$work/ca.cnf" -keyfile "$PKI/user-ca.key" -cert "$PKI/user-ca.crt" -out /dev/stdout 2>/dev/null ;;
   ca) cat "$PKI/service-ca.crt" ;;
   *) sed -n '2,15p' "$0"; exit 2 ;;
 esac

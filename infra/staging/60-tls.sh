@@ -6,6 +6,7 @@
 #   front               TLS front for sandboxes (host.openshell.internal) and LAN clients (server IP)
 #   inference           envoy mTLS proxy in front of the inference engine (gpu-01.gpu.tether.internal)
 #   llm-gateway-client  the LLM gateway's client certificate for that proxy (llm-gateway.tether.internal)
+# Also pushes the user CA and its CRL: run it again after `tether-pki.sh revoke <name>`, then restart tls-front.
 # Rollback: rm -rf ~/.local/state/tether/tls on the server.
 set -euo pipefail
 dest=${1:?ssh destination, e.g. soldoc@192.168.1.27}; ip=${2:?server IP}
@@ -30,6 +31,9 @@ while IFS='|' read -r n kind san; do
   bash "$pki" "sign-$kind" "$work/$n.csr" "$san" > "$work/$n.crt"
 done <<<"$certs"
 bash "$pki" ca > "$work/service-ca.pem"
-scp -q "$work"/*.crt "$work/service-ca.pem" "$dest:.local/state/tether/tls/"
-ssh "$dest" 'cd ~/.local/state/tether/tls && rm -f ./*.csr && chmod 644 ./*.crt service-ca.pem &&
+# People: the user CA (which client certificates the front accepts) and its CRL (revoked people).
+cp "${TETHER_PKI:-$HOME/.tether-pki}/user-ca.crt" "$work/user-ca.pem"
+bash "$pki" crl > "$work/user-ca.crl"
+scp -q "$work"/*.crt "$work/service-ca.pem" "$work/user-ca.pem" "$work/user-ca.crl" "$dest:.local/state/tether/tls/"
+ssh "$dest" 'cd ~/.local/state/tether/tls && rm -f ./*.csr && chmod 644 ./*.crt service-ca.pem user-ca.pem user-ca.crl &&
   for n in *.crt; do openssl verify -CAfile service-ca.pem "$n" >/dev/null && echo "$n: $(openssl x509 -in "$n" -noout -enddate)"; done'

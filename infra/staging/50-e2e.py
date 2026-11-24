@@ -11,10 +11,14 @@ inside it -> attempt to widen it -> kill switch (revoke, delete) -> re-creation 
 Exit status is the number of failed checks. Stdlib only; reads tokens from infra/.env.
 """
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import secrets
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -39,6 +43,17 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     print("blocked", type(e).__name__, e)
 """
+
+
+def person_token(user, groups=()):
+    """A token as POST /v1/auth/token issues it (AUTH_MODE=mtls), signed with this host's USER_TOKEN_KEY.
+    The certificate exchange itself is exercised from a person's machine (README)."""
+    b64 = lambda d: base64.urlsafe_b64encode(json.dumps(d, separators=(",", ":")).encode()).rstrip(b"=")
+    now = int(time.time())
+    signing = b64({"alg": "HS256", "typ": "JWT"}) + b"." + b64({"iss": "tether-policy-api", "aud": "tether", "sub": user,
+                                                               "groups": list(groups), "iat": now, "exp": now + 600})
+    sig = base64.urlsafe_b64encode(hmac.new(ENV["USER_TOKEN_KEY"].encode(), signing, hashlib.sha256).digest()).rstrip(b"=")
+    return (signing + b"." + sig).decode()
 
 
 def check(name, ok, detail=""):
@@ -75,7 +90,7 @@ async def refused(label, coro_factory, name):
 async def main():
     user = f"e2e-{secrets.token_hex(3)}"
     status, s = api("POST", "/v1/agent/sessions", ENV["ORCHESTRATOR_TOKEN"],
-                    {"user_token": f"dev:{user}", "device_id": "staging", "agent": "claude",
+                    {"user_token": person_token(user), "device_id": "staging", "agent": "claude",
                      "repo": "https://github.com/your-org/demo", "environment": "development"})
     check("session issued", status == 200, s)
     if status != 200:
@@ -160,9 +175,11 @@ async def main():
             Path(wide_file).unlink()
 
         # Kill switch: an administrator revokes the session; the orchestrator deletes the sandbox.
-        status, r = api("POST", "/v1/admin/sessions/revoke", "dev:sec-admin:tether-admins",
+        status, r = api("POST", "/v1/admin/sessions/revoke", person_token("e2e-admin", ["tether-admins"]),
                         {"session_id": s["session_id"], "reason": "staging e2e"})
         check("session revoked by an administrator", status == 200 and r["revoked"] == 1, r)
+        status, _ = api("GET", "/v1/admin/guardrails/bypass", "dev:e2e-admin:tether-admins")   # read-only probe
+        check("dev tokens are refused (AUTH_MODE=mtls)", status == 401)
         await gw.delete_sandboxes([name])
         check("sandbox deleted", not await gw.sandbox_exists(name))
         await refused("re-creation after revoke refused", lambda: gw.create_sandbox(name, IMAGE, policy_file, providers, labels), name)
