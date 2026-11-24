@@ -1,3 +1,4 @@
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -57,7 +58,8 @@ def test_users_cannot_create_sessions_directly():
 def test_user_id_comes_from_token_not_body():
     s = new_session(user_id="someone-else")
     assert s["user_id"] == "Kim.Dev"
-    assert s["sandbox_name"].startswith("agent-kim-dev-")
+    assert s["sandbox_name"] == new_session()["sandbox_name"]
+    assert s["sandbox_name"] != new_session(headers={"Authorization": "Bearer dev:someone-else"})["sandbox_name"]
 
 
 def test_permission_check_requires_session_token():
@@ -126,7 +128,7 @@ def test_session_returns_compiled_policy_and_stable_sandbox_name():
     assert a["session_id"] != b["session_id"]
     assert a["session_token"] != b["session_token"]
     assert a["sandbox_name"] == b["sandbox_name"]
-    assert len(a["sandbox_name"]) <= 63
+    assert m.SANDBOX_NAME.fullmatch(a["sandbox_name"]) and a["sandbox_name"].startswith("a-")
     assert a["openshell_policy"]["filesystem_policy"]["read_write"][0] == "/workspace"
     assert a["openshell_policy"]["process"]["run_as_user"] == "sandbox"
 
@@ -138,8 +140,8 @@ def test_sandbox_name_differs_per_repo():
 @pytest.mark.parametrize("user_id", ["../../etc", "a b;rm -rf", "x" * 128])
 def test_sandbox_name_is_sanitized(user_id):
     name = new_session(headers={"Authorization": f"Bearer dev:{user_id}"})["sandbox_name"]
-    assert len(name) <= 63
-    assert all(ch.islower() or ch.isdigit() or ch == "-" for ch in name)
+    # OpenShell's rules for a sandbox name: at most 19 characters, a DNS-1123 label, no "--".
+    assert len(name) <= 19 and re.fullmatch(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", name) and "--" not in name
 
 
 def test_rejects_unusable_user_id():

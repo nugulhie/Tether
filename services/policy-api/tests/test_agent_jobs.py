@@ -86,7 +86,7 @@ def test_manual_run_by_owner_or_admin_only():
     assert r.status_code == 200, r.text
     s = r.json()
     assert s["user_id"] == "kim" and s["job"]["trigger"] == "manual" and s["job"]["task"] == JOB["task"]
-    assert s["sandbox_name"].startswith(f"agent-job-{j['id'][:8]}")  # never the developer's own sandbox
+    assert s["sandbox_name"].startswith("j-") and len(s["sandbox_name"]) == 19  # never the developer's own sandbox
     created = events("session.create")[-1]["unmapped"]
     assert created["job_id"] == j["id"] and created["triggered_by"] == "kim" and created["agent"] == "local"
 

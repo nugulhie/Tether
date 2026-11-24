@@ -167,13 +167,19 @@ def grants(doc):
 def slug(s,n):
     return re.sub(r"[^a-z0-9]+","-",s.lower()).strip("-")[:n].strip("-")
 
-def sandbox_name(user_id,repo,static_hash):
+# OpenShell (v0.1.9) accepts sandbox names of at most 19 characters (MAX_ROUTABLE_NAME_LEN: three names and
+# two "--" must fit one 63-character DNS label), lowercase alphanumerics and single hyphens only.
+SANDBOX_NAME_LEN=19
+SANDBOX_NAME=re.compile(r"[aj]-[0-9a-f]{17}")
+
+def sandbox_name(user_id,repo,static_hash,job=False):
     # Same user + repo + static policy -> same sandbox, so the launcher can reuse it.
     # Only sections OpenShell locks at creation (filesystem, landlock, process) and the
     # credential providers count: network changes are applied live with `openshell policy set`.
-    u=slug(user_id,32)
-    if not u: raise HTTPException(422,"user_id must contain at least one alphanumeric character")
-    return f"agent-{u}-{hashlib.sha256(repo.encode()).hexdigest()[:8]}-{static_hash[:8]}"
+    # "a-" interactive, "j-" job, then 68 bits of the digest; who and what are in the sandbox's labels.
+    if not slug(user_id,32): raise HTTPException(422,"user_id must contain at least one alphanumeric character")
+    digest=hashlib.sha256("\0".join((user_id,repo,static_hash)).encode()).hexdigest()
+    return f"{'j' if job else 'a'}-{digest[:SANDBOX_NAME_LEN-2]}"
 
 def norm(path):
     # posixpath.normpath keeps a leading "//", so collapse it explicitly.
@@ -211,7 +217,7 @@ def create_session(req:SessionReq,orch:Principal=Depends(require("service",servi
         phash=policy_hash({"openshell":compiled,"grants":g}); shash=policy_hash({"static":static_part(compiled),"grants":g})
         sid=str(uuid.uuid4())
         # A job always gets its own sandbox, whoever starts it: never a developer's interactive one.
-        sandbox=sandbox_name(f"job-{job.id}" if job else p.user_id,req.repo,shash)
+        sandbox=sandbox_name(f"job-{job.id}" if job else p.user_id,req.repo,shash,job=bool(job))
         device=p.device_id or req.device_id
         token,token_hash=new_session_token(); expires=now()+timedelta(seconds=ttl)
         job_fields={"job_id":job.id,"trigger":req.trigger,"triggered_by":p.user_id if req.trigger=="manual" else "schedule"} if job else {}
