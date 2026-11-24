@@ -1,6 +1,7 @@
 import base64,json,os,signal,ssl,subprocess,sys,threading,time,click,httpx
 from pathlib import Path
 HOME=Path.home()/".tether"; TOKEN_FILE=HOME/"token.json"
+def user_config_path(): return HOME/"config.json"  # written by `tether setup`
 # Deployed by MDM. When present it is authoritative: environment overrides are ignored so a
 # user cannot point the signed launcher at a different orchestrator.
 MANAGED_CONFIG=Path("/Library/Application Support/Tether/config.json"); MANAGED_OWNER_UID=0
@@ -17,10 +18,16 @@ def managed_config():
         raise click.ClickException(f"{MANAGED_CONFIG} must be owned by root and not group/world-writable")
     return json.loads(MANAGED_CONFIG.read_text())
 
+def user_config():
+    try: return json.loads(user_config_path().read_text())
+    except FileNotFoundError: return {}
+    except ValueError: raise click.ClickException(f"{user_config_path()} is not valid JSON: run `tether setup` again")
+
 def setting(key):
+    """Managed (MDM) config wins outright; otherwise environment, then `tether setup`'s file, then defaults."""
     m=managed_config()
     if m is not None: return m.get(key,DEFAULTS.get(key))
-    return os.getenv(ENV_KEYS[key],DEFAULTS.get(key))
+    return os.getenv(ENV_KEYS[key]) or user_config().get(key) or DEFAULTS.get(key)
 
 def tls_context():
     """Server trust (the company CA when given) plus the client certificate, for HTTPS and WebSocket alike.
@@ -105,6 +112,42 @@ def login():
             if err=="slow_down": interval+=5
             elif err!="authorization_pending": raise click.ClickException(f"login failed: {err}")
     raise click.ClickException("login timed out")
+
+# --- setup ----------------------------------------------------------------------
+# The administrator hands over one folder (infra/pki/tether-pki.sh user): cert.pem, key.pem,
+# service-ca.crt and usually tether.json ({"server": ..., "model": ...}).
+
+def write_private(path,data:bytes,mode):
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,mode)
+    with os.fdopen(fd,"wb") as f: f.write(data)
+    os.chmod(path,mode)
+
+@cli.command()
+@click.argument("folder",type=click.Path(exists=True,file_okay=False,path_type=Path))
+@click.option("--server",help="Server address, e.g. https://192.168.1.27 (default: tether.json in the folder).")
+@click.option("--model",help="Default model for jobs (default: tether.json in the folder).")
+def setup(folder,server,model):
+    """Install the certificate folder your administrator gave you, then sign in."""
+    if managed_config() is not None: raise click.ClickException("this Mac's settings are managed (MDM); ask your administrator")
+    files={n:folder/n for n in ("cert.pem","key.pem","service-ca.crt")}
+    missing=[n for n,f in files.items() if not f.is_file()]
+    if missing: raise click.ClickException(f"{folder} is missing {', '.join(missing)}")
+    given=json.loads((folder/"tether.json").read_text()) if (folder/"tether.json").is_file() else {}
+    server=(server or given.get("server") or "").rstrip("/"); model=model or given.get("model")
+    if not server.startswith("https://"): raise click.ClickException("give --server https://<server address>")
+    try:  # the key must belong to the certificate, and the CA must be a certificate
+        ssl.create_default_context(cafile=str(files["service-ca.crt"])).load_cert_chain(str(files["cert.pem"]),str(files["key.pem"]))
+    except (ssl.SSLError,OSError) as e: raise click.ClickException(f"the certificate files do not work together: {e}")
+    HOME.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(HOME,0o700)
+    for n,f in files.items(): write_private(HOME/n,f.read_bytes(),0o600)
+    cfg={"orchestrator":server,"client_cert":str(HOME/"cert.pem"),"client_key":str(HOME/"key.pem"),"ca_bundle":str(HOME/"service-ca.crt")}
+    if model: cfg["model"]=model
+    write_private(user_config_path(),json.dumps(cfg,indent=2).encode(),0o600)
+    TOKEN_FILE.unlink(missing_ok=True)  # a token from an earlier identity must not outlive it
+    overridden=[v for k,v in ENV_KEYS.items() if k in cfg and os.getenv(v)]
+    if overridden: click.echo(f"note: {', '.join(overridden)} in your environment override these settings",err=True)
+    click.echo(f"Settings saved to {user_config_path()}. The folder {folder} can now be deleted.")
+    t=mtls_token(); click.echo(f"Logged in as {t['user_id']} (client certificate).")
 
 # --- agent launch -------------------------------------------------------------
 # The launcher is only a terminal. The orchestrator creates the session, obtains credentials,

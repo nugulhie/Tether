@@ -36,7 +36,8 @@ SCHEMAS = [
                                             "Returns the exit code and combined stdout/stderr, truncated. Commands are time-limited.",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
     {"type": "function", "function": {
-        "name": "finish", "description": "Call exactly once when the task is complete, with a short summary of what was done.",
+        "name": "finish", "description": "Call exactly once at the end. `summary` is what the requester reads: the answer or result itself "
+                                          "(in full, even if also saved to a file), then the files changed and anything left undone.",
         "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}}},
 ]
 
@@ -120,6 +121,9 @@ class Tools:
         try:
             out, _ = proc.communicate(timeout=self.shell_timeout)
         except subprocess.TimeoutExpired:
+            # The shell first, then its group: macOS signals a group one process at a time, and a shell that
+            # sees its child die first runs the next command (`sleep 30; echo never` printed "never").
+            proc.kill()
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:

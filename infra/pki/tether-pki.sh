@@ -9,7 +9,9 @@
 #   tether-pki.sh init <server-ip>                 create both CAs (once)
 #   tether-pki.sh sign-server <csr> <san> [days]   e.g. "DNS:host.openshell.internal,IP:127.0.0.1"
 #   tether-pki.sh sign-client <csr> <san> [days]   service client certificate (e.g. the LLM gateway)
-#   tether-pki.sh user <name> [days]               person certificate -> $TETHER_PKI/users/<name>/
+#   tether-pki.sh user <name> [days]               person certificate -> $TETHER_PKI/users/<name>/, a folder to hand
+#                                                  over whole: cert.pem, key.pem, service-ca.crt and, when TETHER_SERVER
+#                                                  is set (and optionally TETHER_MODEL), tether.json; then `tether setup <folder>`
 #   tether-pki.sh revoke <name>                    revoke a person's certificate (then push the CRL: 60-tls.sh)
 #   tether-pki.sh crl                              print the user CA's current CRL (valid 365 days; 60-tls.sh re-pushes it)
 #   tether-pki.sh ca                               print the service CA certificate
@@ -59,7 +61,13 @@ case ${1:-} in
     "$OPENSSL" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$d/key.pem" 2>/dev/null; chmod 600 "$d/key.pem"
     "$OPENSSL" req -new -key "$d/key.pem" -subj "/O=Tether/CN=$name" -out "$d/req.csr"
     sign user-ca "$d/req.csr" clientAuth "" "$days" > "$d/cert.pem"; rm -f "$d/req.csr"
-    echo "$d/cert.pem and $d/key.pem (valid $days days); give both to $name over a private channel" ;;
+    cp "$PKI/service-ca.crt" "$d/service-ca.crt"
+    if [ -n "${TETHER_SERVER:-}" ]; then
+      python3 -c 'import json,sys; print(json.dumps({k:v for k,v in (("server",sys.argv[1]),("model",sys.argv[2])) if v}))' \
+        "$TETHER_SERVER" "${TETHER_MODEL:-}" > "$d/tether.json"
+    fi
+    echo "$d (valid $days days): give the whole folder to $name over a private channel; they run: tether setup <folder>"
+    [ -e "$d/tether.json" ] || echo "  no tether.json: set TETHER_SERVER (e.g. https://192.168.1.27) or they pass --server to tether setup" ;;
   revoke)
     name=${2:?name}; d="$PKI/users/$name"; [ -e "$d/cert.pem" ] || die "no certificate for $name"
     serial=$("$OPENSSL" x509 -in "$d/cert.pem" -noout -serial | cut -d= -f2)

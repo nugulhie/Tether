@@ -17,6 +17,7 @@ Logs are JSON lines on stderr with tool names and sizes only; the gateway audits
 import json
 import os
 import ssl
+import subprocess
 import sys
 import time
 
@@ -34,7 +35,12 @@ in a sandbox. Nobody will answer questions. Your working directory is the root o
 Use the tools to inspect and change the repository and to run commands. Paths are relative to the repository root and \
 cannot leave it. Shell commands have no terminal and no stdin, and are time-limited.
 Network access is limited by the sandbox policy; a refused connection is not a bug to work around.
-When the task is complete (or cannot be completed), call `finish` once with a short summary."""
+When the task is complete (or cannot be completed), call `finish` once. Its `summary` is the only thing the person \
+who asked will read, after this sandbox is gone:
+- Put the result itself in it. If the task asks for a summary, an explanation, a review or any other answer, write that \
+answer out in full in `summary`, even if you also saved it to a file. "I created SUMMARY.md" is not an answer.
+- Then say briefly which files you changed and why, and what you could not do and why.
+- Write in the language the task is written in."""
 
 
 class ConfigError(Exception):
@@ -170,6 +176,9 @@ def loop(cfg: dict, tools: Tools, client: httpx.Client, sleep) -> int:
                 if isinstance(summary, str):
                     log("finish", step=step, summary_bytes=len(summary.encode()))
                     print(summary)
+                    changed = changed_files(tools.root)
+                    if changed:  # from git, not from the model: the list is always right
+                        print("\n---\nChanged files (tether job result --diff):\n" + changed)
                     return EXIT_OK
                 result, ok = "error: finish needs a string `summary`", False
             else:
@@ -183,6 +192,16 @@ def loop(cfg: dict, tools: Tools, client: httpx.Client, sleep) -> int:
                 log("tool", step=step, tool=name, ok=ok, output_bytes=len(result.encode()), seconds=round(time.monotonic() - started, 3))
             messages.append({"role": "tool", "tool_call_id": call_id, "content": truncate(result, cfg["max_output"])})
     raise Stop(EXIT_STEPS, f"step limit reached ({cfg['max_steps']}) without finish")
+
+
+def changed_files(workdir: str) -> str:
+    """`git status` of the repository (new files included), or "" when it is not a git checkout."""
+    try:
+        r = subprocess.run(["git", "-c", "core.quotepath=off", "status", "--porcelain", "--untracked-files=all"], cwd=workdir,
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.rstrip() if r.returncode == 0 else ""
 
 
 SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"

@@ -8,6 +8,8 @@ makes), but without GitHub: the github-org provider gets a placeholder credentia
 
 Steps: issue a session (Policy API) -> providers -> create the sandbox from SANDBOX_IMAGE -> checks
 inside it -> attempt to widen it -> kill switch (revoke, delete) -> re-creation refused.
+Then one real job through the orchestrator (clones E2E_REPO from GitHub, runs the local model): request ->
+approve -> run -> its owner reads the answer and patch; another person cannot.
 Exit status is the number of failed checks. Stdlib only; reads tokens from infra/.env.
 """
 import asyncio
@@ -29,6 +31,8 @@ from orchestrator.openshell import OpenShell, OpenShellError  # noqa: E402
 
 ENV = dict(line.split("=", 1) for line in (ROOT / "infra/.env").read_text().splitlines() if "=" in line and not line.startswith("#"))
 POLICY_API = "http://127.0.0.1:8080"
+ORCHESTRATOR = "http://172.30.0.1:8083"   # compose.staging.yml: the orchestrator listens on the compose network's gateway address
+E2E_REPO = ENV.get("E2E_REPO", "https://github.com/nugulhie/Tether")   # public, in GITHUB_ORG
 IMAGE = ENV["SANDBOX_IMAGE"]
 PLATFORM = "host.openshell.internal"   # PLATFORM_LLM_GATEWAY_HOST / PLATFORM_POLICY_API_HOST in compose.staging.yml
 MODEL = ENV.get("STAGING_MODEL", "qwen3.5:122b")
@@ -62,9 +66,9 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
-def api(method, path, token, body=None):
-    req = urllib.request.Request(POLICY_API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
-                                 headers={"Authorization": f"Bearer {token}", "content-type": "application/json"})
+def api(method, path, token, body=None, base=POLICY_API, headers=None):
+    req = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {token}", "content-type": "application/json", **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, json.loads(r.read() or b"null")
@@ -191,6 +195,43 @@ async def main():
             await gw.run("provider", "delete", pname, check=False)
 
 
+def job_checks():
+    owner, admin = person_token(f"e2e-{secrets.token_hex(3)}"), person_token("e2e-admin", ["tether-admins"])
+    status, j = api("POST", "/v1/agent/jobs", owner, {
+        "name": "staging e2e", "repo": E2E_REPO, "model": MODEL, "max_runtime_seconds": 600,
+        "task": "Create a file named E2E.txt in the repository root containing exactly the word tether. "
+                "Then call finish with the summary: e2e done."})
+    check("job requested (pending)", status == 200 and j["status"] == "pending", j)
+    if status != 200:
+        return
+    try:
+        status, _ = api("POST", f"/v1/admin/agent/jobs/{j['id']}/approve", admin, {"reason": "staging e2e"})
+        check("job approved by an administrator", status == 200)
+        # As tls-front forwards it: the person's token and the certificate serial header.
+        status, run = api("POST", f"/v1/jobs/{j['id']}/run", owner, base=ORCHESTRATOR, headers={"x-tether-client-serial": "e2e"})
+        check("job run started through the orchestrator", status == 200 and run.get("status") == "started", run)
+        if status != 200:
+            return
+        deadline, r = time.monotonic() + 660, None
+        while time.monotonic() < deadline:
+            _, runs = api("GET", f"/v1/agent/jobs/{j['id']}/runs", owner)
+            r = next((x for x in runs["runs"] if x["session_id"] == run["session_id"]), None)
+            if r and r["status"] != "running":
+                break
+            time.sleep(5)
+        check("job run finished with a stored result", bool(r) and r["status"] == "finished" and r.get("returncode") == 0, r)
+        status, v = api("GET", f"/v1/agent/jobs/{j['id']}/runs/{run['session_id']}", owner)
+        check("owner reads the answer with the changed-file list", status == 200 and "Changed files" in (v.get("output") or ""),
+              (v.get("output") or "")[-300:])
+        check("owner reads the patch with the agent's new file", status == 200 and "b/E2E.txt" in (v.get("diff") or ""),
+              (v.get("diff") or "")[:300])
+        status, _ = api("GET", f"/v1/agent/jobs/{j['id']}/runs/{run['session_id']}", person_token("e2e-someone-else"))
+        check("another person cannot see the job's result (404)", status == 404)
+    finally:
+        api("POST", f"/v1/admin/agent/jobs/{j['id']}/disable", admin, {"reason": "staging e2e finished"})
+
+
 asyncio.run(main())
+job_checks()
 print(f"\n{len(failures)} failed" + (": " + ", ".join(failures) if failures else ""))
 sys.exit(len(failures))

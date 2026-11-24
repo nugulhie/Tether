@@ -193,3 +193,20 @@ def test_bad_tool_calls_are_reported_to_the_model(tmp_path, repo):
 def test_malformed_gateway_response(tmp_path, repo):
     model = FakeModel(httpx.Response(200, json={"choices": []}))
     assert run(model, env(tmp_path), repo) == agent.EXIT_ERROR
+
+
+def test_answer_ends_with_the_changed_files_from_git(tmp_path, repo, capsys):
+    import subprocess
+    git = lambda *a: subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", *a], cwd=repo, check=True, capture_output=True)
+    git("init", "-q"); git("add", "."); git("commit", "-qm", "init")
+    model = FakeModel(reply(call("write_file", "a", path="VERSION", content="2\n"), call("write_file", "b", path="docs/요약.md", content="x")),
+                      reply(call("finish", "c", summary="요약 내용 전체")))
+    assert run(model, env(tmp_path), repo) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("요약 내용 전체\n") and "Changed files" in out
+    assert " M VERSION" in out and "?? docs/요약.md" in out  # new files too, names unescaped
+
+
+def test_prompt_asks_for_the_answer_itself():
+    p = agent.SYSTEM_PROMPT
+    assert "only thing the person" in p and "is not an answer" in p and "language the task is written in" in p

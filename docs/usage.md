@@ -11,32 +11,15 @@
 ### 1. 처음 한 번: 설치와 설정
 
 **관리자에게 받을 것**(공개 채널이나 메일 말고 직접 전달):
-- `cert.pem`, `key.pem`: 내 개인 인증서와 키. 이것이 내 신원입니다. 다른 사람에게 주지 마세요.
-- `service-ca.crt`: 서버가 진짜 회사 서버인지 확인하는 인증서
+- 내 이름으로 된 폴더 하나: 개인 인증서와 키(`cert.pem`, `key.pem`), 서버 확인용 인증서(`service-ca.crt`), 접속 설정(`tether.json`). 키가 곧 내 신원이니 다른 사람에게 주지 마세요.
 - `tether-0.1.0.pkg`: 설치 파일
 
 ```bash
-# 인증서를 ~/.tether에 둡니다
-mkdir -p ~/.tether && chmod 700 ~/.tether
-mv cert.pem key.pem service-ca.crt ~/.tether/ && chmod 600 ~/.tether/key.pem
-
-# 설치 (서명되지 않은 패키지라 더블클릭 대신 터미널로)
-sudo installer -pkg tether-0.1.0.pkg -target /
-
-# 설정 (~/.zshrc 끝에 추가한 뒤 새 터미널을 엽니다)
-cat >> ~/.zshrc <<'EOF'
-export TETHER_ORCHESTRATOR=https://192.168.1.27
-export TETHER_CLIENT_CERT=$HOME/.tether/cert.pem
-export TETHER_CLIENT_KEY=$HOME/.tether/key.pem
-export TETHER_CA_BUNDLE=$HOME/.tether/service-ca.crt
-export TETHER_MODEL=qwen3.5:122b
-EOF
+sudo installer -pkg tether-0.1.0.pkg -target /    # 서명되지 않은 패키지라 더블클릭 대신 터미널로
+tether setup ~/Downloads/<받은 폴더>               # 인증서를 ~/.tether에 넣고 설정을 저장한 뒤 로그인까지 확인
+#  Logged in as <내 이름> (client certificate).
 ```
-
-새 터미널에서 확인합니다. 회사 네트워크 안에서만 됩니다.
-```bash
-tether login        # Logged in as <내 이름> (client certificate).
-```
+끝나면 받은 폴더는 지워도 됩니다. 회사 네트워크 안에서만 됩니다.
 이후 로그인은 자동으로 갱신되므로 다시 할 필요가 없습니다.
 
 ### 2. 작업 요청
@@ -68,6 +51,7 @@ tether job result 0f3c --diff > change.patch && git apply change.patch   # 변�
 tether job result 0f3c --log     # 실패했을 때: 에이전트 로그의 끝부분
 tether job show 0f3c             # 작업 내용과 실행 기록
 ```
+- 답변 끝에는 바뀐 파일 목록이 붙습니다(`M` 수정, `??` 새 파일). 내용은 `--diff`로 봅니다.
 - 작업 id는 앞 몇 글자만 써도 됩니다.
 - `run`에서 Ctrl-C를 누르면 기다리기만 멈춥니다. 실행은 계속되고, 나중에 `result`로 볼 수 있습니다.
 - 에이전트는 GitHub에 push하지 못합니다. 변경분은 `--diff`로 받아서 직접 검토하고 커밋하세요.
@@ -84,7 +68,7 @@ tether job show 0f3c             # 작업 내용과 실행 기록
 | 메시지 | 원인과 조치 |
 |---|---|
 | `cannot reach https://192.168.1.27 ...` | 회사 네트워크 밖이거나 서버가 꺼짐 |
-| `certificate required` / `certificate revoked` | 설정의 인증서 경로 확인. 폐기되었거나 만료(90일)되었으면 관리자에게 재발급 요청 |
+| `certificate required` / `certificate revoked` | 폐기되었거나 만료(90일)됨. 관리자에게 새 폴더를 받아 `tether setup`을 다시 |
 | `job is pending, not approved` | 아직 승인 전 |
 | `this job is already running` | 같은 작업이 실행 중. 끝난 뒤 다시 |
 | `agents may only work on repositories in the ... organization` | 허용된 조직의 저장소가 아님 |
@@ -93,8 +77,8 @@ tether job show 0f3c             # 작업 내용과 실행 기록
 
 ### 직원 관리 (관리자 Mac)
 ```bash
-bash infra/pki/tether-pki.sh user <이름>       # ~/.tether-pki/users/<이름>/cert.pem, key.pem (90일)
-#   + ~/.tether-pki/service-ca.crt, agent-launcher/build/tether-0.1.0.pkg 를 직접 전달
+TETHER_SERVER=https://192.168.1.27 TETHER_MODEL=qwen3.5:122b bash infra/pki/tether-pki.sh user <이름>
+#   -> ~/.tether-pki/users/<이름>/ 폴더(90일)를 통째로, agent-launcher/build/tether-0.1.0.pkg 와 함께 직접 전달
 bash infra/pki/tether-pki.sh revoke <이름>     # 퇴사·분실
 bash infra/staging/60-tls.sh soldoc@192.168.1.27 192.168.1.27 && ssh soldoc@192.168.1.27 docker restart infra-tls-front-1
 ```

@@ -91,3 +91,9 @@ LLM gateway ─mTLS(llm-gateway.tether.internal)─▶ inference-proxy :8443 (�
 - 런처 버그 수정: `TETHER_CA_BUNDLE`을 주면 httpx 0.28이 클라이언트 인증서를 버려 `tether login`이 `certificate required`로 실패했다. CA와 인증서를 담은 SSL 컨텍스트를 직접 만들어 HTTPS와 WebSocket에 같이 쓴다. 실제 TLS 핸드셰이크 테스트 추가.
 - 실서버 확인: `tether job request` → `approve` → `run`(25초, 대기 후 답변 출력) → `result --diff`(새 `SUMMARY.md` 패치) → `result --log`. 빌드한 `.pkg`의 실행 파일로도 로그인과 조회 확인. e2e 26개 통과.
 - `tether claude`, `tether codex`는 이 서버에서 쓸 수 없다: 샌드박스 이미지에 없고, 외부 모델 API는 막혀 있다. 이 구성에서 직원이 쓰는 것은 `tether job`이다. 사용법은 [docs/usage.md](../../docs/usage.md).
+
+## 2026-11-24 직원 설정과 에이전트 답변
+- `TETHER_SERVER=https://<서버> TETHER_MODEL=<모델> tether-pki.sh user <이름>`이 인증서, 키, `service-ca.crt`, `tether.json`을 한 폴더로 만든다. 직원은 `tether setup <폴더>` 한 번으로 `~/.tether`(700, 파일 600)에 넣고 `config.json`에 설정을 저장한 뒤 로그인까지 확인한다. 키와 인증서가 짝이 맞지 않으면 아무것도 쓰지 않고 거부한다. 우선순위: MDM 관리 설정 > 환경 변수 > `config.json`.
+- `tether-agent`: 지시문을 고쳐 `finish`의 내용이 결과 그 자체가 되게 했다("파일을 만들었다"가 아니라 요약 본문). 답변 끝에 모델이 아니라 `git status`가 확인한 변경 파일 목록을 붙인다. 이미지를 다시 만들어 digest를 `.env`에 고정했다.
+- 셸 도구 시간 초과: macOS는 프로세스 그룹에 SIGKILL을 하나씩 보내서, 자식이 먼저 죽으면 셸이 다음 명령을 실행했다(`sleep 30; echo never`가 "never" 출력, 테스트가 가끔 실패). 셸을 먼저 죽이고 그룹을 죽인다. 리눅스(실서버)에서는 재현되지 않았다.
+- `50-e2e.py`에 실제 job 7개 항목: 요청 → 승인 → orchestrator로 실행(GitHub에서 clone, 로컬 모델) → 결과 저장 → 주인이 답변(변경 파일 목록)과 패치(`E2E.txt`) 조회 → 다른 사람은 404. 33개 통과.
