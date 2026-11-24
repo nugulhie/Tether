@@ -1,0 +1,32 @@
+# Host firewall for the single-host deployment (GPU server = control plane), loaded by 90-firewall.sh.
+# Its own table: other tables (Docker's, ufw's) keep working; a packet must be accepted by every base chain.
+# Docker-published ports (tls-front 127.0.0.1:443 and LAN :443) are DNATed before this input chain and
+# pass through FORWARD, which Docker manages; only host listeners are filtered here.
+# Sandbox egress is not filtered here: OpenShell's supervisor originates it from the host network and
+# enforces each sandbox's policy itself. Host-level egress pinning (infra/gpu/network) would break it.
+# 90-firewall.sh fills in LAN, LLM_GATEWAY, TLS_FRONT and OLLAMA_UID (numeric: a name is resolved at load time).
+
+table inet tether_host {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iif lo accept
+    ct state established,related accept
+    ct state invalid drop
+    meta l4proto icmp accept
+    meta l4proto ipv6-icmp accept
+    udp sport 67 udp dport 68 accept                       # DHCP lease renewals (losing the address = lockout)
+    ip saddr $LAN tcp dport 22 accept                       # SSH from the office network ("on this network = company")
+    ip saddr $LAN tcp dport 443 accept                      # people listener, if Docker serves it via docker-proxy
+    ip saddr $LLM_GATEWAY tcp dport 8443 accept             # inference proxy (mTLS): the LLM gateway container only
+    ip saddr $TLS_FRONT tcp dport 8083 accept               # orchestrator API: tls-front only
+    limit rate 6/minute log prefix "tether-fw drop in: " level info
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+    # The inference engine talks to local clients only: no route out for prompts, responses or weights.
+    # (`ollama pull` needs this lifted: `sudo nft delete table inet tether_host`, pull, re-apply.)
+    meta skuid $OLLAMA_UID oif != lo limit rate 6/minute log prefix "tether-fw drop ollama out: " level warn
+    meta skuid $OLLAMA_UID oif != lo drop
+  }
+}

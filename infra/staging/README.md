@@ -21,6 +21,7 @@ Mac:      tether CLI → 오케스트레이터
 | 5 | `50-e2e.py` | 아니오 | 실제 gateway에 대고 세션 발급 → 프로바이더 → 샌드박스 생성 → 내부 검사(사용자, 파일시스템, egress, 바이너리 고정) → 정책 확대 시도 → 킬 스위치까지 19개 항목 확인. 종료 코드 = 실패 수 | 스스로 정리 |
 | 6 | `80-publish-policies.sh` (**Mac**) | 아니오 | 정책 디렉터리를 Mac의 Ed25519 키(`~/.tether-pki/policy-signing.key`)로 서명해 발행. 서버에는 공개키만. `AUTH_MODE=mtls`에서는 서명된 번들만 받는다 | 이전 정책을 다시 발행(새 serial) |
 | 7 | `70-backup.sh` (**Mac**) | 아니오 | 서버 DB 덤프와 `.env`를 Mac(`~/TetherBackups`)으로 가져오고 감사 해시 체인을 검증, 지난번 head가 그대로인지 비교. 이상하면 macOS 알림. `--install`로 매일 12:30 | `--uninstall` |
+| 9 | `sudo bash infra/staging/90-firewall.sh apply` (**서버, sudo**) | 예 | 호스트 방화벽(`firewall.nft`): SSH·443은 LAN에서만, 8443은 LLM gateway 컨테이너만, 8083은 tls-front만, `ollama` 사용자의 외부 송신 차단. 메모리에만 적용(재부팅하면 사라짐) + 5분 자동 롤백. **새 SSH 세션**에서 `confirm`해야 유지. 지금 SSH 주소가 LAN 밖이면 거부 | `remove`, 또는 5분 대기, 또는 재부팅 |
 
 `install.sh`를 `main`에서 받아 파이프로 실행하지 않고, 릴리스 .deb를 고정 해시로 설치합니다.
 
