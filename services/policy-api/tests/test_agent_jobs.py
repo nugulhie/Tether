@@ -63,6 +63,15 @@ def test_only_other_administrators_approve():
     assert client.post(f"/v1/admin/agent/jobs/{j['id']}/approve", json={"reason": "again"}, headers=ADMIN).status_code == 409
 
 
+def test_single_administrator_may_self_approve_and_it_is_recorded(monkeypatch):
+    monkeypatch.setenv("SINGLE_ADMIN_APPROVAL", "1")
+    j = request_job().json()  # kim's job; kim is an administrator (ADMIN2)
+    assert client.post(f"/v1/admin/agent/jobs/{j['id']}/approve", json={"reason": "x"}, headers=LEE).status_code == 403  # still admin-only
+    r = client.post(f"/v1/admin/agent/jobs/{j['id']}/approve", json={"reason": "only admin"}, headers=ADMIN2)
+    assert r.status_code == 200 and r.json()["decided_by"] == "kim"
+    assert events("agent.job.approve")[-1]["unmapped"]["self_approved"] is True
+
+
 def test_rejected_and_disabled_jobs_do_not_run():
     j = request_job().json()
     client.post(f"/v1/admin/agent/jobs/{j['id']}/reject", json={"reason": "too broad"}, headers=ADMIN)

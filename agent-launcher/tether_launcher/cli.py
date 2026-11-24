@@ -5,7 +5,8 @@ HOME=Path.home()/".tether"; TOKEN_FILE=HOME/"token.json"
 # user cannot point the signed launcher at a different orchestrator.
 MANAGED_CONFIG=Path("/Library/Application Support/Tether/config.json"); MANAGED_OWNER_UID=0
 ENV_KEYS={"orchestrator":"TETHER_ORCHESTRATOR","device_id":"TETHER_DEVICE_ID","oidc_issuer":"TETHER_OIDC_ISSUER",
-          "oidc_client_id":"TETHER_OIDC_CLIENT_ID","client_cert":"TETHER_CLIENT_CERT","client_key":"TETHER_CLIENT_KEY"}
+          "oidc_client_id":"TETHER_OIDC_CLIENT_ID","client_cert":"TETHER_CLIENT_CERT","client_key":"TETHER_CLIENT_KEY",
+          "ca_bundle":"TETHER_CA_BUNDLE"}
 DEFAULTS={"orchestrator":"http://localhost:8083","device_id":"local-dev"}
 
 def managed_config():
@@ -23,8 +24,20 @@ def setting(key):
 
 def http(timeout=10):
     # mTLS client certificate identifies the device when the API sits behind an mTLS proxy.
-    cert=setting("client_cert"); key=setting("client_key")
-    return httpx.Client(timeout=timeout,cert=(cert,key) if cert else None)
+    cert=setting("client_cert"); key=setting("client_key"); ca=setting("ca_bundle")
+    return httpx.Client(timeout=timeout,cert=(cert,key) if cert else None,verify=ca or True)
+
+def mtls_mode():
+    """No SSO: the client certificate is the identity, exchanged for a short-lived token."""
+    return not setting("oidc_issuer") and bool(setting("client_cert"))
+
+def mtls_token():
+    url=f"{setting('orchestrator').rstrip('/')}/v1/auth/token"
+    try:
+        with http() as c: r=c.post(url)
+    except httpx.HTTPError as e: raise click.ClickException(f"cannot reach {url}: {e}")
+    if r.status_code!=200: raise click.ClickException(f"certificate login refused ({r.status_code}): {r.text[:200]}")
+    t=r.json(); save_token({"id_token":t["token"]},expires_at=t["expires_at"]); return t
 
 # --- OIDC login (device authorization grant, RFC 8628) -----------------------
 
@@ -38,16 +51,22 @@ def jwt_exp(token):
     payload=token.split(".")[1]; payload+="="*(-len(payload)%4)
     return json.loads(base64.urlsafe_b64decode(payload))["exp"]
 
-def save_token(t):
+def save_token(t,expires_at=None):
     # The ID token is the API bearer (like kubectl's OIDC plugin); the API's audience is the client id.
     HOME.mkdir(parents=True,exist_ok=True,mode=0o700)
-    data={"id_token":t["id_token"],"refresh_token":t.get("refresh_token"),"expires_at":jwt_exp(t["id_token"])}
+    data={"id_token":t["id_token"],"refresh_token":t.get("refresh_token"),"expires_at":expires_at or jwt_exp(t["id_token"])}
     fd=os.open(TOKEN_FILE,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
     with os.fdopen(fd,"w") as f: json.dump(data,f)
     os.chmod(TOKEN_FILE,0o600)  # O_CREAT mode does not apply to an existing file
 
 def load_token():
     if os.getenv("TETHER_TOKEN") and managed_config() is None: return os.environ["TETHER_TOKEN"]
+    if mtls_mode():
+        # Certificate login is silent: fetch a fresh token whenever the stored one is missing or expiring.
+        if TOKEN_FILE.exists():
+            t=json.loads(TOKEN_FILE.read_text())
+            if t["expires_at"]-60>time.time(): return t["id_token"]
+        return mtls_token()["token"]
     if not TOKEN_FILE.exists(): raise click.ClickException("not logged in: run `tether login`")
     t=json.loads(TOKEN_FILE.read_text())
     if t["expires_at"]-60>time.time(): return t["id_token"]
@@ -63,7 +82,9 @@ def cli(): pass
 
 @cli.command()
 def login():
-    """Sign in with company SSO."""
+    """Sign in with company SSO, or with your client certificate when there is no SSO."""
+    if mtls_mode():
+        t=mtls_token(); click.echo(f"Logged in as {t['user_id']} (client certificate)."); return
     client_id,d=oidc_config()
     with http() as c:
         a=c.post(d["device_authorization_endpoint"],data={"client_id":client_id,"scope":"openid email profile offline_access"}).raise_for_status().json()

@@ -16,7 +16,7 @@ from sqlalchemy import and_, delete, exists, func, or_, select
 from policy_compiler import PolicyError, compile_policy, policy_hash, static_part
 from policy_compiler import bundle as bundles
 from . import ocsf
-from .auth import Principal, SESSION_TOKEN_PREFIX, bearer, env, hash_token, is_admin, new_session_token, service_principal, verified_device, verify_user_token
+from .auth import Principal, SESSION_TOKEN_PREFIX, bearer, client_identity, env, hash_token, is_admin, issue_user_token, new_session_token, service_principal, verified_device, verify_user_token
 from .db import Session, migrate
 from .models import AgentJob, AgentSession, AuditEvent, ContentHold, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
 
@@ -195,6 +195,18 @@ def host_of(resource):
 
 @app.get("/health")
 def health(): return {"status":"ok"}
+
+@app.post("/v1/auth/token")
+def user_token(request:Request):
+    """AUTH_MODE=mtls: exchange a verified client certificate (via the mTLS front) for a short-lived bearer token."""
+    if env("AUTH_MODE","oidc")!="mtls": raise HTTPException(404,"not available in this authentication mode")
+    user,serial=client_identity(request)
+    token,expires=issue_user_token(user)
+    p=Principal(kind="user",user_id=user,device_id=serial,device_verified=True)
+    with Session() as db:
+        record(db,"auth.token.issue",p,source="policy-api",data={"certificate_serial":serial,"expires_at":expires})
+        db.commit()
+    return {"token":token,"expires_at":expires,"user_id":user}
 @app.post("/v1/agent/sessions")
 def create_session(req:SessionReq,orch:Principal=Depends(require("service",service="sandbox-orchestrator"))):
     # Only the orchestrator receives session tokens: it injects them into the sandbox as an
@@ -648,9 +660,11 @@ def decide(job_id,to,allowed_from,event,reason,p):
         if not j: raise HTTPException(404,"job not found")
         if j.status not in allowed_from: raise HTTPException(409,f"job is {j.status}")
         # Separation of duties: nobody approves their own job.
-        if to=="approved" and j.owner==p.user_id: raise HTTPException(403,"a job must be approved by an administrator other than its owner")
+        # SINGLE_ADMIN_APPROVAL=1 (an organization with one administrator) allows it, and the record says so.
+        self_approved=to=="approved" and j.owner==p.user_id
+        if self_approved and env("SINGLE_ADMIN_APPROVAL")!="1": raise HTTPException(403,"a job must be approved by an administrator other than its owner")
         j.status,j.decided_by,j.decided_at,j.decision_reason=to,p.user_id,now(),reason
-        record(db,event,p,source="policy-api",message=reason,data={"job_id":j.id,"name":j.name,"owner":j.owner,"status":to,"reason":reason,
+        record(db,event,p,source="policy-api",message=reason,data={"job_id":j.id,"name":j.name,"owner":j.owner,"status":to,"reason":reason,"self_approved":self_approved,
                                                                    "task_sha256":hashlib.sha256(j.task.encode()).hexdigest()})
         db.commit()
         return job_view(j)

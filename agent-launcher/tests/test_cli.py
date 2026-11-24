@@ -179,3 +179,46 @@ class TestManagedConfig:
         assert invoke("claude").exit_code == 0
         assert str(w.requests[0].url) == "https://agents.company.internal/v1/launch"
         assert w.ws_urls[0].startswith("wss://agents.company.internal/v1/attach?ticket=T1")
+
+
+class CertWorld:
+    """No SSO: the client certificate is exchanged for a short-lived token at the orchestrator's front."""
+    def __init__(self, monkeypatch, tmp_path, status=200):
+        self.calls, self.status, self.expires = [], status, int(time.time()) + 3600
+        monkeypatch.delenv("TETHER_TOKEN", raising=False)
+        monkeypatch.delenv("TETHER_OIDC_ISSUER", raising=False)
+        monkeypatch.setenv("TETHER_CLIENT_CERT", "/certs/kim.pem")
+        monkeypatch.setenv("TETHER_CLIENT_KEY", "/certs/kim.key")
+        monkeypatch.setenv("TETHER_ORCHESTRATOR", "https://192.168.1.27")
+        monkeypatch.setattr(cli, "HOME", tmp_path)
+        monkeypatch.setattr(cli, "TOKEN_FILE", tmp_path / "token.json")
+        monkeypatch.setattr(cli, "MANAGED_CONFIG", tmp_path / "none.json")
+        monkeypatch.setattr(cli, "http", lambda timeout=10: httpx.Client(transport=httpx.MockTransport(self.handle)))
+
+    def handle(self, req):
+        self.calls.append(str(req.url))
+        if self.status != 200:
+            return httpx.Response(self.status, text="certificate required")
+        return httpx.Response(200, json={"token": f"tok{len(self.calls)}", "expires_at": self.expires, "user_id": "kim"})
+
+
+def test_certificate_login(monkeypatch, tmp_path):
+    w = CertWorld(monkeypatch, tmp_path)
+    r = invoke("login")
+    assert r.exit_code == 0 and "kim" in r.output
+    assert w.calls == ["https://192.168.1.27/v1/auth/token"]
+    assert cli.load_token() == "tok1" and len(w.calls) == 1   # reused while valid
+    assert stat.S_IMODE(os.stat(tmp_path / "token.json").st_mode) == 0o600
+
+
+def test_certificate_token_renews_silently(monkeypatch, tmp_path):
+    w = CertWorld(monkeypatch, tmp_path)
+    w.expires = int(time.time()) + 30          # inside the 60 s margin
+    assert cli.load_token() == "tok1"
+    assert cli.load_token() == "tok2"          # fetched again, no login prompt
+
+
+def test_certificate_refused_is_a_clean_error(monkeypatch, tmp_path):
+    CertWorld(monkeypatch, tmp_path, status=401)
+    r = invoke("login")
+    assert r.exit_code != 0 and "refused (401)" in r.output

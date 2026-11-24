@@ -1,7 +1,9 @@
 """Caller authentication for the Policy API.
 
 Three kinds of callers:
-- user:    a developer, via an OIDC ID token (launcher, credential broker on the user's behalf)
+- user:    a developer, via an OIDC ID token (launcher, credential broker on the user's behalf), or with
+           AUTH_MODE=mtls a short-lived token this API issues to a verified client certificate
+           (POST /v1/auth/token through the mTLS front; see client_identity)
 - session: an agent session, via the opaque session token issued at session creation
            (Permission MCP inside the sandbox). Identity comes from the stored session,
            never from the request body.
@@ -14,8 +16,11 @@ Three kinds of callers:
 Settings are read per call so tests and deployments can change them via environment.
 """
 import hashlib
+import ipaddress
 import os
+import re
 import secrets
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -61,8 +66,66 @@ def _jwks(url):
     return jwt.PyJWKClient(url, cache_keys=True)
 
 
+USER_TOKEN_ISSUER = "tether-policy-api"
+USER_TOKEN_AUDIENCE = "tether"
+USER_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
+
+
+def _user_token_key() -> str:
+    key = env("USER_TOKEN_KEY")
+    if len(key) < 32:
+        raise HTTPException(500, "USER_TOKEN_KEY is not configured (at least 32 characters)")
+    return key
+
+
+def admin_users() -> set[str]:
+    return {u.strip() for u in env("ADMIN_USERS").split(",") if u.strip()}
+
+
+def issue_user_token(user: str) -> tuple[str, int]:
+    """AUTH_MODE=mtls: a bearer token for the person a client certificate names. Short-lived, so a
+    certificate taken off the front's trust (CRL) stops working within the TTL."""
+    ttl = int(env("USER_TOKEN_TTL_SECONDS", "3600"))
+    now = int(time.time())
+    groups = [g for g in env("ADMIN_GROUPS", "tether-admins").split(",") if g][:1] if user in admin_users() else []
+    claims = {"iss": USER_TOKEN_ISSUER, "aud": USER_TOKEN_AUDIENCE, "sub": user, "groups": groups, "iat": now, "exp": now + ttl}
+    return jwt.encode(claims, _user_token_key(), algorithm="HS256"), now + ttl
+
+
+def client_identity(request: Request) -> tuple[str, str | None]:
+    """(user, certificate serial) asserted by the mTLS front for a verified client certificate.
+
+    Trusted only from IDENTITY_PROXY_ADDRESSES (the front's fixed address): the front verifies the
+    certificate against the user CA and overwrites these headers; any other peer could set them."""
+    proxies = [ipaddress.ip_network(a.strip(), strict=False) for a in env("IDENTITY_PROXY_ADDRESSES").split(",") if a.strip()]
+    peer = request.client.host if request.client else ""
+    try:
+        trusted = any(ipaddress.ip_address(peer) in n for n in proxies)
+    except ValueError:
+        trusted = False
+    if not trusted:
+        raise HTTPException(403, "client certificate identity is accepted only from the mTLS front")
+    subject = request.headers.get(env("CLIENT_SUBJECT_HEADER", "x-tether-client-subject"), "")
+    # RFC 2253 subject, e.g. "CN=kim,O=Tether". Names are restricted, so no escaped commas can occur.
+    cns = [part.strip()[3:] for part in subject.split(",") if part.strip().upper().startswith("CN=")]
+    if len(cns) != 1 or not USER_NAME.fullmatch(cns[0]):
+        raise HTTPException(401, "client certificate required")
+    return cns[0], request.headers.get(env("CLIENT_SERIAL_HEADER", "x-tether-client-serial")) or None
+
+
 def verify_user_token(token: str) -> tuple[str, tuple[str, ...]]:
-    """Return (user id, groups) from an OIDC ID token."""
+    """Return (user id, groups) from an OIDC ID token (or, with AUTH_MODE=mtls, a token from issue_user_token)."""
+    if env("AUTH_MODE", "oidc") == "mtls":
+        try:
+            claims = jwt.decode(token, _user_token_key(), algorithms=["HS256"], audience=USER_TOKEN_AUDIENCE, issuer=USER_TOKEN_ISSUER,
+                                options={"require": ["exp", "iat", "iss", "aud", "sub"]}, leeway=30)
+        except jwt.PyJWTError as e:
+            raise HTTPException(401, f"invalid token: {e}", headers={"WWW-Authenticate": "Bearer"})
+        user = claims["sub"]
+        if not isinstance(user, str) or not USER_NAME.fullmatch(user):
+            raise HTTPException(401, "token has no user")
+        groups = claims.get("groups") or []
+        return user, tuple(g for g in groups if isinstance(g, str))
     if env("AUTH_MODE", "oidc") == "dev":
         # Local development only: "dev:<user>[:<group>,<group>]" is accepted without verification.
         _, user, groups = (token.split(":", 2) + ["", ""])[:3]

@@ -12,6 +12,7 @@ PRODUCT = {"name": "Company Agent Security Platform", "vendor_name": "Company"}
 
 API_ACTIVITY = (6003, 6, "API Activity", "Application Activity")
 PROCESS_ACTIVITY = (1007, 1, "Process Activity", "System Activity")
+AUTHENTICATION = (3002, 3, "Authentication", "Identity & Access Management")
 
 # event_type -> (class, activity_id, activity_name)
 EVENT_TYPES = {
@@ -40,6 +41,7 @@ EVENT_TYPES = {
     "agent.job.reject": (API_ACTIVITY, 3, "Update"),
     "agent.job.disable": (API_ACTIVITY, 3, "Update"),
     "session.end": (API_ACTIVITY, 4, "Delete"),
+    "auth.token.issue": (AUTHENTICATION, 1, "Logon"),
 }
 # Users and agent sessions report nothing: sandbox lifecycle is recorded by the orchestrator,
 # which is the only component that can create, attach to or delete sandboxes.
