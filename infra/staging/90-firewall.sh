@@ -19,8 +19,8 @@ case ${1:-} in
     lan=$(ip -4 -o addr show dev "$iface" | awk '{print $4; exit}')
     lan=$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$lan")
     # Refuse to lock out the session applying it.
-    client=${SSH_CLIENT%% *}
-    [ -n "$client" ] || client=$(who -m 2>/dev/null | sed -n 's/.*(\([0-9.]*\)).*/\1/p')   # sudo may drop SSH_CLIENT
+    client=${SSH_CLIENT:-}; client=${client%% *}    # sudo usually drops SSH_CLIENT (and set -u would stop here)
+    [ -n "$client" ] || client=$(who -m 2>/dev/null | sed -n 's/.*(\([0-9.]*\)).*/\1/p')
     [ -n "$client" ] || { echo "run this from an SSH session (it checks that your own address stays allowed)" >&2; exit 1; }
     python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)' "$client" "$lan" \
       || { echo "your address $client is outside $lan: refusing" >&2; exit 1; }
