@@ -1,0 +1,35 @@
+# infra/gpu/network config for the single-host deployment (GPU server = control plane host, no DNS).
+#   python3 infra/gpu/network/generate.py --config infra/staging/gpu-network.yaml --out infra/staging/out/gpu-network
+# Names under tether.internal exist only in container host files (compose extra_hosts), never in DNS.
+# Only out/gpu-network/envoy is used so far; the firewall step revisits ssh and egress before applying nftables.
+
+inference:
+  domain: gpu.tether.internal
+  # The LLM gateway container maps this name to the Docker host (extra_hosts: host-gateway).
+  upstream: https://gpu-01.gpu.tether.internal:8443
+  proxy_port: 8443
+  engine_port: 11434          # Ollama, bound to 127.0.0.1 only (its default)
+  allowed_paths: [/v1/chat/completions, /v1/completions, /v1/models]
+  hosts:
+    - name: gpu-01
+      fqdn: gpu-01.gpu.tether.internal
+      address: 192.168.1.27
+
+gateway:
+  # The llm-gateway container's fixed address on the compose network (compose.staging.yml). Traffic from a
+  # container to the host keeps its container source address, so this is what the proxy sees.
+  source_cidrs: [172.30.0.10/32]
+  client_san_dns: llm-gateway.tether.internal
+
+tls:
+  # Paths inside the proxy container (~/.local/state/tether/tls mounted at /etc/tether/tls).
+  server_cert: /etc/tether/tls/inference.crt
+  server_key: /etc/tether/tls/inference.key
+  client_ca: /etc/tether/tls/service-ca.pem
+
+ssh:
+  port: 22
+  # REVISIT at the firewall step: the administrator's machine. There is no bastion; the name is a label only.
+  bastion_host: admin.tether.internal
+  bastion_cidrs: [192.168.1.52/32]
+  admin_group: sudo

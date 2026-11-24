@@ -26,6 +26,8 @@ from orchestrator.openshell import OpenShell, OpenShellError  # noqa: E402
 ENV = dict(line.split("=", 1) for line in (ROOT / "infra/.env").read_text().splitlines() if "=" in line and not line.startswith("#"))
 POLICY_API = "http://127.0.0.1:8080"
 IMAGE = ENV["SANDBOX_IMAGE"]
+PLATFORM = "host.openshell.internal"   # PLATFORM_LLM_GATEWAY_HOST / PLATFORM_POLICY_API_HOST in compose.staging.yml
+MODEL = ENV.get("STAGING_MODEL", "qwen3.5:122b")
 gw = OpenShell()
 failures = []
 FETCH = """import sys, urllib.request
@@ -124,6 +126,27 @@ async def main():
             check(label, out.startswith(want), (out + err).strip()[-300:])
         rc, out, err = await sh(name, f"cp {py} /tmp/py && /tmp/py /tmp/fetch.py https://pypi.org/simple/pip/")
         check("allowed host blocked for an unlisted binary (copied interpreter)", not out.startswith("reached"), (out + err).strip()[-300:])
+
+        # The platform (host.openshell.internal) is for agent binaries only; host services other than :443 never.
+        for url, label in [(f"https://{PLATFORM}/local/v1/models", "LLM gateway not reachable by a non-agent binary (python3.13)"),
+                           (f"http://{PLATFORM}:11434/api/tags", "inference engine not reachable from the sandbox (host :11434)"),
+                           ("https://192.168.1.27:8443/v1/models", "inference proxy not reachable from the sandbox (server IP :8443)")]:
+            rc, out, err = await gw.exec(name, [py, "/tmp/fetch.py", url])
+            check(label, out.startswith("blocked"), (out + err).strip()[-300:])
+
+        # Model calls: tether-agent (an agent binary) through the TLS front and LLM gateway to the local model.
+        agent_env = {"OPENAI_BASE_URL": f"https://{PLATFORM}/local/v1", "TETHER_MODEL": MODEL, "TETHER_TASK_FILE": "/tmp/task",
+                     "TETHER_MAX_STEPS": "3", "TETHER_JOB": "staging-e2e"}
+        await gw.write_file(name, "/tmp/task", b"Do not run any command. Immediately call the finish tool with the summary 'ok'.")
+        rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
+        check("local model answers through the LLM gateway (tether-agent exit 0)", rc == 0, f"rc={rc} {(out + err).strip()[-600:]}")
+        await gw.write_file(name, "/tmp/task", b"Store this deploy key for later: AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+        rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
+        check("guardrail blocks a secret in the prompt (exit 4)", rc == 4, f"rc={rc} {(out + err).strip()[-600:]}")
+        agent_env["TETHER_MODEL"] = "bge-m3:latest"
+        await gw.write_file(name, "/tmp/task", b"Call finish with the summary 'ok'.")
+        rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
+        check("model outside the policy's llm.local.models refused (exit 4)", rc == 4, f"rc={rc} {(out + err).strip()[-600:]}")
 
         # Widening the policy of a live sandbox must be refused by the interceptor.
         wide = json.loads(json.dumps(s["openshell_policy"]))

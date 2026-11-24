@@ -1,0 +1,33 @@
+# Staging policy for the single-host deployment (mounted as the Policy API's POLICY_DIR by compose.staging.yml).
+# Same as policies/backend-dev.yaml plus the self-hosted model (Ollama on the GPU server) and the local agent
+# binary, which only tether-agent may use to reach the LLM gateway.
+policy_id: staging-local-llm
+version: 1
+priority: 10
+description: Staging - development policy with the self-hosted model.
+match:
+  repos: ["*"]
+  environments: [development, staging]
+filesystem:
+  read_only: [/usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+  read_write: [/tmp, /dev/null]
+network:
+  allow: [github.com, api.github.com, pypi.org, registry.npmjs.org]
+network_binaries: [/usr/bin/git, /usr/local/bin/python3.13, /usr/local/bin/node]
+process:
+  allow: [git, python, pytest, npm]
+  deny: [sudo, docker, kubectl]
+aws:
+  role: null
+  duration_seconds: 3600
+github:
+  org: your-org
+  permissions: {contents: write, pull_requests: write, metadata: read}
+llm:
+  local: {models: ["qwen3.5:*"]}
+  max_requests_per_minute: 120
+agent_binaries: [/usr/local/bin/node, /usr/local/bin/tether-agent]
+guardrails:
+  input: {secrets: true, pii: true, deny_patterns: []}
+  output: {secrets: true, pii: false}
+  on_error: deny

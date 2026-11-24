@@ -26,6 +26,23 @@ export TETHER_JWT_PUBLIC_KEY=$HOME/.local/state/openshell/tls/jwt/public.pem
 test -r "$TETHER_JWT_PUBLIC_KEY" || { echo "missing $TETHER_JWT_PUBLIC_KEY (run 20-openshell.sh first)" >&2; exit 1; }
 mkdir -p -m 700 "$TETHER_RUN_DIR"
 
+# TLS material from 60-tls.sh (run on the administrator's machine first).
+export TETHER_TLS_DIR=$HOME/.local/state/tether/tls
+for f in front.crt front.key inference.crt inference.key llm-gateway-client.crt llm-gateway-client.key service-ca.pem; do
+  test -r "$TETHER_TLS_DIR/$f" || { echo "missing $TETHER_TLS_DIR/$f (run infra/staging/60-tls.sh from the admin machine)" >&2; exit 1; }
+done
+export ENVOY_IMAGE=${ENVOY_IMAGE:-envoyproxy/envoy:v1.34.1@sha256:007da57c2c328a90bd4e6d99b70bd899132f1b4a9426ccafe25437cf84a60c14}
+
+# Company provider profiles with the platform hosts as sandboxes see them on this host.
+rm -rf infra/staging/out/profiles; mkdir -p infra/staging/out/profiles
+for p in openshell/profiles/*.yaml; do
+  sed -e 's/^\(  - host: \)llm-gateway\.company\.internal$/\1host.openshell.internal/' \
+      -e 's/^\(  - host: \)policy-api\.company\.internal$/\1host.openshell.internal/' "$p" > "infra/staging/out/profiles/$(basename "$p")"
+done
+for p in tether-llm tether-policy; do
+  grep -q '^  - host: host.openshell.internal$' "infra/staging/out/profiles/$p.yaml" || { echo "profile $p host not rewritten" >&2; exit 1; }
+done
+
 compose() { docker compose --env-file infra/.env -f infra/docker-compose.yml -f infra/staging/compose.staging.yml "$@"; }
 compose up -d --build
 for _ in $(seq 60); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 2; done

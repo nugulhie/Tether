@@ -14,6 +14,7 @@ Mac:      tether CLI → 오케스트레이터
 | 0 | `00-preflight.sh` | 아니오 | 읽기 전용 점검(OS, cgroups v2, GPU, Ollama 바인딩, 런타임, 포트) | 없음 |
 | 1 | `10-docker.sh` | 예 | Docker 공식 apt 저장소(키 지문 확인)에서 Docker Engine 설치, 사용자를 `docker` 그룹에 추가 | 스크립트 상단 주석 |
 | 2 | `20-openshell.sh` | 예 | OpenShell v0.1.9 .deb를 SHA-256으로 확인 후 설치, gateway를 사용자 systemd 서비스로 시작(`https://127.0.0.1:17670`), Docker 드라이버 고정, 텔레메트리 끔, linger 켬, CLI에 gateway 등록 | 스크립트 상단 주석 |
+| 2.5 | `60-tls.sh` (**관리자 Mac에서**) | 아니오 | Mac의 `~/.tether-pki`에 CA 2개(서비스용: 이름 제한, 개인용) 생성. 서버에서 키·CSR 생성 → Mac에서 서명 → 인증서만 서버로(`~/.local/state/tether/tls`). 재실행하면 갱신 | `rm -rf ~/.local/state/tether/tls` |
 | 3 | `30-control-plane.sh` | 아니오 | `infra/.env`에 호스트별 키·토큰 생성(600), compose를 `compose.staging.yml`과 함께 기동(포트는 127.0.0.1만, postgres 비공개), interceptor는 gateway JWT 검증을 켜고 `$XDG_RUNTIME_DIR/tether/` unix 소켓에서 대기 | 스크립트 상단 주석 |
 | 4 | `40-gateway-config.sh` | 아니오 | `infra/openshell/gateway.toml`에 staging 소켓 경로를 넣어 `~/.config/openshell/gateway.toml`로 설치, `config preflight` 후 재시작. `binding_policy = "exact"`라 재시작 성공이 곧 바인딩 일치 확인 | 스크립트 상단 주석 |
 | 5 | `50-e2e.py` | 아니오 | 실제 gateway에 대고 세션 발급 → 프로바이더 → 샌드박스 생성 → 내부 검사(사용자, 파일시스템, egress, 바이너리 고정) → 정책 확대 시도 → 킬 스위치까지 19개 항목 확인. 종료 코드 = 실패 수 | 스스로 정리 |
@@ -30,6 +31,7 @@ ssh soldoc@192.168.1.27
 bash ~/tether-staging/20-openshell.sh
 bash ~/tether-staging/00-preflight.sh  # Docker, OpenShell이 [ok]인지 확인
 # 저장소를 ~/tether에 둔 뒤(sudo 불필요)
+# (Mac) bash infra/staging/60-tls.sh soldoc@192.168.1.27 192.168.1.27
 cd ~/tether && bash infra/staging/30-control-plane.sh && bash infra/staging/40-gateway-config.sh
 python3 infra/staging/50-e2e.py        # SANDBOX_IMAGE(digest 고정)를 infra/.env에 둔 뒤
 ```
@@ -46,7 +48,19 @@ python3 infra/staging/50-e2e.py        # SANDBOX_IMAGE(digest 고정)를 infra/.
   - egress: `python3.13`→pypi.org 허용, example.com·api.anthropic.com 차단, 같은 인터프리터를 복사한 바이너리로는 pypi.org도 차단
   - 실행 중 정책 확대 거부, 관리자 세션 철회 → 삭제 → 같은 이름 재생성 거부
 - 실제 환경에서 찾아 고친 버그: OpenShell은 샌드박스 이름을 19자(DNS-1123 label, `--` 금지)로 제한한다(`MAX_ROUTABLE_NAME_LEN`). Policy API가 만들던 `agent-<user>-<해시>-<해시>`(최대 59자)는 모든 생성이 `INVALID_ARGUMENT`로 실패했다. 이름을 `a-`(대화형)/`j-`(job) + `sha256(user, repo, static_hash)` 17자로 바꿨다.
-- 아직: 샌드박스→LLM gateway 호출(TLS, `host.openshell.internal` 인증서), GitHub App 연동 clone, envoy mTLS→Ollama, 방화벽, GGUF 서명
+- 아직: GitHub App 연동 clone, orchestrator 컨테이너 경유 실행(OpenShell CLI·인증서 연결), 개인 인증서로 dev 모드 대체, 방화벽, GGUF 서명
+
+## 2026-11-24 모델 호출 경로 (단일 서버)
+```
+샌드박스(tether-agent) ─TLS─▶ OpenShell 프록시 ─TLS(service CA)─▶ tls-front 127.0.0.1:443 ─┬ /v1/ → Policy API
+                                                                                        └ 그 외 → LLM gateway(172.30.0.10)
+LLM gateway ─mTLS(llm-gateway.tether.internal)─▶ inference-proxy :8443 (출발지 172.30.0.10만) ─▶ Ollama 127.0.0.1:11434
+```
+- 인증서: CA 루트 키는 관리자 Mac에만 있다. 서비스 CA는 `host.openshell.internal`, `tether.internal`, 서버 IP, 127.0.0.1로 이름 제한(다른 이름은 `permitted subtree violation`으로 검증 실패 확인). OpenShell은 `gateway.toml`의 `[openshell.supervisor.network] additional_ca_bundle`로 이 CA를 신뢰한다(`40-gateway-config.sh`).
+- `host.openshell.internal`은 서버 loopback이다. 그래서 정책 컴파일러는 `network.allow`의 호스트 별칭(`host.openshell.internal`, `localhost` 등), IP 주소, 플랫폼 호스트를 거부한다.
+- Ollama 앞 envoy 설정은 `infra/staging/gpu-network.yaml`을 `infra/gpu/network/generate.py`로 렌더링한 것(`out/gpu-network`). DNS가 없어 `gpu-01.gpu.tether.internal`은 LLM gateway 컨테이너의 `extra_hosts`로만 존재한다.
+- 확인: 인증서 없이, 다른 출발지에서, 다른 컨테이너에서 inference-proxy 접근 거부. LLM gateway 컨테이너에서만 모델 목록 200.
+- `50-e2e.py` 25개 통과(기존 19개 + 6개): python3.13으로 LLM gateway 접근 차단(에이전트 바이너리 아님), 샌드박스에서 호스트 :11434와 서버 IP :8443 차단, `tether-agent`가 qwen3.5:122b 응답 받음(`llm.request local 200`), 프롬프트의 AWS 키는 가드레일이 차단(`guardrail.block`), 정책 밖 모델(bge-m3) 거부(`llm.denied`, 이번에 감사 이벤트 추가). 본문은 암호화 저장 확인.
 
 ## 주의
 - `docker` 그룹은 root와 같은 권한입니다. staging 전용으로 받아들이고, 운영에서는 gateway 전용 계정을 씁니다.

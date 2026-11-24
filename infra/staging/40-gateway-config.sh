@@ -14,6 +14,11 @@ new=$(mktemp); trap 'rm -f "$new"' EXIT
 sed "s|^grpc_endpoint *= *\"unix:///run/tether/gateway-interceptor.sock\".*|grpc_endpoint      = \"unix://$sock\"|" \
   infra/openshell/gateway.toml > "$new"
 grep -q "unix://$sock" "$new" || { echo "grpc_endpoint not rewritten" >&2; exit 1; }
+# Sandboxes call the platform over TLS signed by the service CA (60-tls.sh). OpenShell trusts it for every
+# policy-permitted endpoint, which is why that CA is name-constrained to the platform's own names.
+ca=$HOME/.local/state/tether/tls/service-ca.pem
+test -f "$ca" && ! test -L "$ca" || { echo "missing $ca (run 60-tls.sh)" >&2; exit 1; }
+printf '\n[openshell.supervisor.network]\nadditional_ca_bundle = "%s"\n' "$ca" >> "$new"
 openshell-gateway config preflight --path "$new"
 [ -f "$dst" ] && cp -p "$dst" "$dst.bak"
 install -m 600 "$new" "$dst"
