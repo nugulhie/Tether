@@ -141,3 +141,21 @@ class AgentJob(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     last_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentJobRun(Base):
+    # What one job run left behind (reported by the orchestrator before it deletes the sandbox).
+    # The bodies (answer, log tail, patch) are llm_contents rows: encrypted, purged after
+    # CONTENT_RETENTION_DAYS like prompts and responses, and kept under the same legal holds.
+    __tablename__ = "agent_job_runs"
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(36), index=True)
+    returncode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    output_content_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    output_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    log_content_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    diff_content_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    diff_truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

@@ -34,11 +34,16 @@ if cmd == ["sandbox", "exec"]:
         with open(sandbox_file(name, cmdline[4]), "w") as f:
             f.write(stdin)
         sys.exit(0)
+    if cmdline[:2] == ["sh", "-c"] and "git" in cmdline[2] and "diff" in cmdline[2]:  # job result: workspace patch
+        sys.stdout.write(os.environ.get("FAKE_DIFF", ""))
+        sys.exit(int(os.environ.get("FAKE_DIFF_RC", "0")))
     if "--no-tty" in argv:  # a non-interactive local agent run
         import time
         envs = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "--env")
         if "TETHER_TASK_FILE" in envs and not os.path.exists(sandbox_file(name, envs["TETHER_TASK_FILE"])):
             sys.exit(66)  # like the real agent: no task file, no run
+        sys.stdout.write(os.environ.get("FAKE_AGENT_OUTPUT", "")); sys.stdout.flush()
+        sys.stderr.write(os.environ.get("FAKE_AGENT_LOG", "")); sys.stderr.flush()
         time.sleep(float(os.environ.get("FAKE_AGENT_SLEEP", "0")))
         sys.exit(int(os.environ.get("FAKE_AGENT_RC", "0")))
     envs = dict(a.split("=", 1) for a in argv[argv.index("--tty"):argv.index("--")] if "=" in a)

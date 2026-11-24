@@ -261,6 +261,52 @@ DEFAULT_LOCAL_AGENT = ["tether-agent"]
 TASK_FILE = f"{WORKSPACE}/.tether-task"
 
 
+# What a run leaves behind for its owner (`GET /v1/agent/jobs/{id}/runs/...` at the Policy API): the
+# agent's final answer (stdout), the end of its log (stderr) and the repository changes as a patch.
+# The sandbox and its workspace are deleted right after, so this is the only copy.
+MAX_RESULT_OUTPUT_BYTES = 256 * 1024
+MAX_RESULT_LOG_BYTES = 16 * 1024
+MAX_RESULT_DIFF_BYTES = 2 * 1024 * 1024
+# Against the cloned commit (origin/HEAD), so commits the agent made itself are included; untracked
+# files are marked intent-to-add so that new files appear too.
+DIFF_SCRIPT = ('git add -A --intent-to-add . >/dev/null 2>&1; '
+               'base=$(git rev-parse -q --verify origin/HEAD || git rev-parse -q --verify HEAD) || exit 0; '
+               'exec git -c core.quotepath=off diff --no-color --no-ext-diff --binary "$base"')
+DIFF_SECONDS = 60
+
+
+def clip(text: str, limit: int, keep_end: bool = False) -> tuple[str, bool]:
+    raw = text.encode()
+    if len(raw) <= limit:
+        return text, False
+    part = raw[-limit:] if keep_end else raw[:limit]
+    return part.decode(errors="ignore"), True
+
+
+async def workspace_diff(name: str, workdir: str) -> tuple[str, bool, str | None]:
+    try:
+        rc, out, err = await asyncio.wait_for(openshell.exec(name, ["sh", "-c", DIFF_SCRIPT], workdir), timeout=DIFF_SECONDS)
+    except (asyncio.TimeoutError, OpenShellError) as e:
+        return "", False, f"diff not collected: {str(e) or 'timed out'}"
+    if rc != 0:
+        return "", False, f"diff not collected ({rc}): {err.strip()[-300:]}"
+    text, cut = clip(out, MAX_RESULT_DIFF_BYTES)
+    return text, cut, None
+
+
+async def report_result(s: dict, result: dict, output: str, logs: str, diff: str, diff_truncated: bool):
+    out, out_cut = clip(output, MAX_RESULT_OUTPUT_BYTES)
+    tail, _ = clip(logs, MAX_RESULT_LOG_BYTES, keep_end=True)
+    body = {"session_id": s["session_id"], "returncode": result["returncode"], "timed_out": result["timed_out"],
+            "error": (result.get("error") or "")[:1000] or None, "output": out, "output_truncated": out_cut,
+            "log": tail, "diff": diff, "diff_truncated": diff_truncated}
+    try:
+        await call("POST", f"{env('POLICY_API', 'http://localhost:8080')}/v1/agent/jobs/{s['job']['id']}/runs",
+                   headers=service_headers(), json_body=body)
+    except HTTPException as e:
+        log.error("result of job %s session %s was not stored: %s", s["job"]["id"], s["session_id"], e.detail)
+
+
 def local_agent_argv() -> list[str]:
     # JSON list, e.g. ["tether-agent", "--non-interactive"]; the agent reads its task from TETHER_TASK_FILE.
     raw = env("LOCAL_AGENT_COMMAND")
@@ -284,16 +330,24 @@ async def run_job(s: dict, name: str, workdir: str):
     result = {"sandbox_name": name, "job_id": job["id"], "trigger": job["trigger"], "triggered_by": job["triggered_by"],
               "returncode": None, "timed_out": False}
 
+    output, logs, diff, diff_cut = "", "", "", False
+
     async def execute():
         await openshell.write_file(name, TASK_FILE, job["task"].encode())
         return await openshell.exec(name, local_agent_argv(), workdir, env=agent_env)
     try:
-        rc, _, _ = await asyncio.wait_for(execute(), timeout=job["max_runtime_seconds"])
-        result["returncode"] = rc
-    except asyncio.TimeoutError:
-        result["timed_out"] = True
-    except OpenShellError as e:
-        result["error"] = str(e)
+        try:
+            rc, output, logs = await asyncio.wait_for(execute(), timeout=job["max_runtime_seconds"])
+            result["returncode"] = rc
+        except asyncio.TimeoutError:
+            result["timed_out"] = True
+        except OpenShellError as e:
+            result["error"] = str(e)
+        # Collected even after a failure or timeout: partial work is still worth reviewing.
+        diff, diff_cut, diff_error = await workspace_diff(name, workdir)
+        if diff_error:
+            result["diff_error"] = diff_error
+        await report_result(s, result, output, logs, diff, diff_cut)
     finally:
         await audit("agent.exit", s, result, success=result["returncode"] == 0)
         try:

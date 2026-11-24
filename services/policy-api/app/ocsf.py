@@ -40,6 +40,8 @@ EVENT_TYPES = {
     "agent.job.approve": (API_ACTIVITY, 3, "Update"),
     "agent.job.reject": (API_ACTIVITY, 3, "Update"),
     "agent.job.disable": (API_ACTIVITY, 3, "Update"),
+    "agent.job.result": (API_ACTIVITY, 1, "Create"),
+    "agent.job.result.read": (API_ACTIVITY, 2, "Read"),
     "session.end": (API_ACTIVITY, 4, "Delete"),
     "auth.token.issue": (AUTHENTICATION, 1, "Logon"),
 }

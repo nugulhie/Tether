@@ -84,3 +84,10 @@ LLM gateway ─mTLS(llm-gateway.tether.internal)─▶ inference-proxy :8443 (�
 - orchestrator 컨테이너는 호스트 네트워크에서 OpenShell CLI(정적 바이너리)와 gateway 클라이언트 인증서를 읽기 전용으로 받아 gateway(127.0.0.1:17670)를 호출한다. API는 172.30.0.1:8083(컴포즈 네트워크 게이트웨이 주소)에만 열려 tls-front만 닿는다.
 - GitHub App이 없어 staging 정책은 `github.org: nugulhie`, permissions 없음(github-org 프로바이더 없음): 공개 저장소를 익명으로 clone만 한다.
 - 관리자 Mac에서 실제 경로로 확인: 인증서 로그인 → job 등록 → 자기 승인(`self_approved`) → `POST /v1/jobs/{id}/run`(tls-front → orchestrator) → 세션·샌드박스 생성, `nugulhie/Tether` clone → `tether-agent`가 qwen3.5:122b로 README 요약(`llm.request` 200 두 번, `agent.exit` 0) → 샌드박스 삭제, 세션 종료. 응답 본문은 사유를 적어야 열람된다(`reason`).
+
+## 2026-11-24 job 결과 조회와 `tether job`
+- 실행이 끝나면 orchestrator가 샌드박스를 지우기 전에 에이전트의 최종 답변(stdout, 최대 256KB), 로그 끝(stderr, 16KB), 저장소 변경분(clone한 커밋 대비 `git diff`, 새 파일 포함, 최대 2MB)을 Policy API(`POST /v1/agent/jobs/{id}/runs`)로 보낸다. 시간 초과나 실패여도 그때까지의 변경분을 보낸다.
+- 본문은 `llm_contents`에 암호화되어 프롬프트·응답과 같은 보존 기간과 법적 보존을 따른다. 감사 이벤트(`agent.job.result`)에는 크기와 해시만. job 주인과 관리자만 읽고(`agent.job.result.read`), 다른 사람에게는 job이 없는 것처럼 404.
+- 런처 버그 수정: `TETHER_CA_BUNDLE`을 주면 httpx 0.28이 클라이언트 인증서를 버려 `tether login`이 `certificate required`로 실패했다. CA와 인증서를 담은 SSL 컨텍스트를 직접 만들어 HTTPS와 WebSocket에 같이 쓴다. 실제 TLS 핸드셰이크 테스트 추가.
+- 실서버 확인: `tether job request` → `approve` → `run`(25초, 대기 후 답변 출력) → `result --diff`(새 `SUMMARY.md` 패치) → `result --log`. 빌드한 `.pkg`의 실행 파일로도 로그인과 조회 확인. e2e 26개 통과.
+- `tether claude`, `tether codex`는 이 서버에서 쓸 수 없다: 샌드박스 이미지에 없고, 외부 모델 API는 막혀 있다. 이 구성에서 직원이 쓰는 것은 `tether job`이다. 사용법은 [docs/usage.md](../../docs/usage.md).

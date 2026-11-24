@@ -6,7 +6,7 @@ HOME=Path.home()/".tether"; TOKEN_FILE=HOME/"token.json"
 MANAGED_CONFIG=Path("/Library/Application Support/Tether/config.json"); MANAGED_OWNER_UID=0
 ENV_KEYS={"orchestrator":"TETHER_ORCHESTRATOR","device_id":"TETHER_DEVICE_ID","oidc_issuer":"TETHER_OIDC_ISSUER",
           "oidc_client_id":"TETHER_OIDC_CLIENT_ID","client_cert":"TETHER_CLIENT_CERT","client_key":"TETHER_CLIENT_KEY",
-          "ca_bundle":"TETHER_CA_BUNDLE"}
+          "ca_bundle":"TETHER_CA_BUNDLE","policy_api":"TETHER_POLICY_API","model":"TETHER_MODEL"}
 DEFAULTS={"orchestrator":"http://localhost:8083","device_id":"local-dev"}
 
 def managed_config():
@@ -22,10 +22,17 @@ def setting(key):
     if m is not None: return m.get(key,DEFAULTS.get(key))
     return os.getenv(ENV_KEYS[key],DEFAULTS.get(key))
 
+def tls_context():
+    """Server trust (the company CA when given) plus the client certificate, for HTTPS and WebSocket alike.
+    Built here rather than with httpx's cert=/verify=<path>: with a CA path httpx 0.28 drops the certificate."""
+    ca=setting("ca_bundle"); cert=setting("client_cert")
+    ctx=ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+    if cert: ctx.load_cert_chain(cert,setting("client_key"))
+    return ctx
+
 def http(timeout=10):
-    # mTLS client certificate identifies the device when the API sits behind an mTLS proxy.
-    cert=setting("client_cert"); key=setting("client_key"); ca=setting("ca_bundle")
-    return httpx.Client(timeout=timeout,cert=(cert,key) if cert else None,verify=ca or True)
+    # mTLS client certificate identifies the person (no SSO) or the device behind an mTLS proxy.
+    return httpx.Client(timeout=timeout,verify=tls_context())
 
 def mtls_mode():
     """No SSO: the client certificate is the identity, exchanged for a short-lived token."""
@@ -124,11 +131,7 @@ def request_launch(agent,environment,token):
 
 def ws_connect(url):
     from websockets.sync.client import connect
-    ctx=None
-    if url.startswith("wss://"):
-        ctx=ssl.create_default_context()
-        if setting("client_cert"): ctx.load_cert_chain(setting("client_cert"),setting("client_key"))
-    return connect(url,ssl=ctx,max_size=None,open_timeout=30)
+    return connect(url,ssl=tls_context() if url.startswith("wss://") else None,max_size=None,open_timeout=30)
 
 def fd(stream):
     try: return stream.fileno()
@@ -192,6 +195,149 @@ def claude(environment):
 def codex(environment):
     """Run Codex in a managed sandbox."""
     sys.exit(run("codex",environment))
+
+# --- local-agent jobs ------------------------------------------------------------
+# Jobs run the company's local model on a repository: request -> administrator approval -> run.
+# The run happens on the server; what it produced (answer, log tail, patch) is fetched afterwards.
+# Behind the mTLS front both APIs share one address; TETHER_POLICY_API is for setups where they don't.
+
+def api(method,path,*,orchestrator=False,timeout=30,**kw):
+    base=setting("orchestrator") if orchestrator else (setting("policy_api") or setting("orchestrator"))
+    url=f"{base.rstrip('/')}{path}"
+    try:
+        with http(timeout=timeout) as c: r=c.request(method,url,headers={"Authorization":f"Bearer {load_token()}"},**kw)
+    except httpx.HTTPError as e: raise click.ClickException(f"cannot reach {url}: {e}")
+    if r.status_code>=400:
+        detail=r.json().get("detail",r.text) if r.headers.get("content-type","").startswith("application/json") else r.text
+        raise click.ClickException(f"{method} {path} refused ({r.status_code}): {detail}")
+    return r.json()
+
+def resolve_job(ref):
+    """A full job id, or a unique prefix of one of the jobs you can see."""
+    if len(ref)==36: return ref
+    hits=[j for j in api("GET","/v1/agent/jobs")["jobs"] if j["id"].startswith(ref)]
+    if len(hits)!=1: raise click.ClickException(f"{'no' if not hits else 'more than one'} job matches {ref!r}: see `tether job list`")
+    return hits[0]["id"]
+
+def read_task(task,task_file):
+    if bool(task)==bool(task_file): raise click.ClickException("give the task with exactly one of --task or --task-file")
+    if task: return task
+    return sys.stdin.read() if task_file=="-" else Path(task_file).read_text()
+
+def run_summary(r):
+    if r["status"]!="finished": return r["status"]
+    if r.get("timed_out"): return "timed out"
+    return "ok" if r.get("returncode")==0 else f"failed (exit {r.get('returncode')})"
+
+@cli.group()
+def job():
+    """Tasks for the company's local model: request, get approved, run, read the result."""
+
+@job.command("request")
+@click.option("--task",help="What the agent should do.")
+@click.option("--task-file",type=click.Path(allow_dash=True),help="Read the task from a file (- for stdin).")
+@click.option("--name",help="Short name (default: the first line of the task).")
+@click.option("--repo",help="Repository URL (default: this checkout's origin).")
+@click.option("--model",help="Model (default: TETHER_MODEL).")
+@click.option("--every",type=int,help="Also run on a schedule, every N minutes.")
+@click.option("--max-runtime",type=int,default=3600,show_default=True,help="Seconds before a run is stopped.")
+def job_request(task,task_file,name,repo,model,every,max_runtime):
+    """Ask for a job. An administrator approves it before it can run."""
+    text=read_task(task,task_file)
+    model=model or setting("model")
+    if not model: raise click.ClickException("give --model (or set TETHER_MODEL)")
+    name=name or (text.strip().splitlines() or ["job"])[0][:60]
+    j=api("POST","/v1/agent/jobs",json={"name":name,"repo":repo or git_remote(),"model":model,"task":text,
+                                         "interval_minutes":every,"max_runtime_seconds":max_runtime})
+    click.echo(f"{j['id']}  {j['status']}  {j['name']}")
+    click.echo("Waiting for an administrator's approval. Then: tether job run "+j["id"][:8],err=True)
+
+@job.command("list")
+@click.option("--status",type=click.Choice(["pending","approved","rejected","disabled"]))
+def job_list(status):
+    """Your jobs (administrators: everyone's)."""
+    for j in api("GET","/v1/agent/jobs",params={"status":status} if status else None)["jobs"]:
+        every=f"every {j['interval_minutes']}m" if j["interval_minutes"] else "manual"
+        click.echo(f"{j['id'][:8]}  {j['status']:<8}  {j['owner']:<12}  {every:<10}  {j['name']}")
+
+def decision(action):
+    @click.argument("job_ref")
+    @click.option("--reason",required=True,help="Recorded in the audit log.")
+    def cmd(job_ref,reason):
+        j=api("POST",f"/v1/admin/agent/jobs/{resolve_job(job_ref)}/{action}",json={"reason":reason})
+        click.echo(f"{j['id'][:8]}  {j['status']}  {j['name']}")
+    cmd.__doc__=f"{action.capitalize()} a job (administrators)."
+    return job.command(action)(cmd)
+for _a in ("approve","reject","disable"): decision(_a)
+
+@job.command("show")
+@click.argument("job_ref")
+def job_show(job_ref):
+    """A job's details, task and runs."""
+    jid=resolve_job(job_ref)
+    j=next((x for x in api("GET","/v1/agent/jobs")["jobs"] if x["id"]==jid),None)
+    if j:
+        for k in ("id","name","owner","status","repo","model","interval_minutes","max_runtime_seconds","decided_by","decision_reason"):
+            click.echo(f"{k:<20}{j[k]}")
+        click.echo("task:\n  "+j["task"].replace("\n","\n  "))
+    runs=api("GET",f"/v1/agent/jobs/{jid}/runs")["runs"]
+    click.echo("runs:" if runs else "runs: none")
+    for r in runs: click.echo(f"  {r['session_id']}  {r['started_at'][:19]}  {r['trigger']:<8}  {run_summary(r)}")
+
+def show_result(jid,sid,part):
+    r=api("GET",f"/v1/agent/jobs/{jid}/runs/{sid}")
+    if r["status"]!="finished":
+        raise click.ClickException(f"run {sid} is {r['status']}" + ("" if r["status"]=="running" else " (no result was stored)"))
+    note=" (truncated)" if r.get(f"{part}_truncated") else ""
+    click.echo(f"[tether] run {sid}: {run_summary(r)}{note}",err=True)
+    if r.get("error"): click.echo(f"[tether] {r['error']}",err=True)
+    body=r.get(part)
+    if body is None:
+        click.echo(f"[tether] no {part}" + (" (removed after the retention period)" if r.get("purged") else ""),err=True)
+    else:
+        click.echo(body,nl=not body.endswith("\n"))
+    return 0 if run_summary(r)=="ok" else 1
+
+def part_option(f):
+    f=click.option("--diff","part",flag_value="diff",help="Print the repository changes as a patch (for git apply).")(f)
+    f=click.option("--log","part",flag_value="log",help="Print the end of the agent's log.")(f)
+    return click.option("--output","part",flag_value="output",default=True,help="Print the agent's answer (default).")(f)
+
+@job.command("run")
+@click.argument("job_ref")
+@click.option("--wait/--no-wait",default=True,show_default=True,help="Wait for the run and print its result.")
+@part_option
+def job_run(job_ref,wait,part):
+    """Run an approved job now."""
+    jid=resolve_job(job_ref)
+    started=api("POST",f"/v1/jobs/{jid}/run",orchestrator=True,timeout=300)
+    sid=started["session_id"]
+    click.echo(f"[tether] started run {sid} in sandbox {started['sandbox_name']}",err=True)
+    if not wait: return
+    click.echo("[tether] waiting for it to finish (Ctrl-C stops waiting, not the run)",err=True)
+    try:
+        while True:
+            r=next((x for x in api("GET",f"/v1/agent/jobs/{jid}/runs")["runs"] if x["session_id"]==sid),None)
+            if r and r["status"]!="running": break
+            time.sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        click.echo(f"\n[tether] later: tether job result {jid[:8]} --run {sid}",err=True); sys.exit(130)
+    sys.exit(show_result(jid,sid,part))
+
+POLL_SECONDS=5
+
+@job.command("result")
+@click.argument("job_ref")
+@click.option("--run","run_id",help="A run's session id (default: the latest finished run).")
+@part_option
+def job_result(job_ref,run_id,part):
+    """What a run produced: the answer (default), --diff or --log."""
+    jid=resolve_job(job_ref)
+    if not run_id:
+        done=[r for r in api("GET",f"/v1/agent/jobs/{jid}/runs")["runs"] if r["status"]=="finished"]
+        if not done: raise click.ClickException("this job has no finished run yet")
+        run_id=done[0]["session_id"]
+    sys.exit(show_result(jid,run_id,part))
 
 main=cli
 if __name__=="__main__": cli()

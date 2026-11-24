@@ -23,7 +23,8 @@ class JobWorld(World):
                                                          "sandbox_name": "agent-job-job-1-abc-def", "job": job,
                                                          "providers": {"agent-job-job-1-abc-def-llm": "tether-llm",
                                                                        "agent-job-job-1-abc-def-github": "github-org"}})
-        self.ended, self.due, self.credential_auth = [], [{"id": "job-1", "name": "nightly-deps"}], []
+        self.ended, self.due, self.credential_auth, self.results = [], [{"id": "job-1", "name": "nightly-deps"}], [], []
+        self.result_status = 200
         monkeypatch.setenv("POLICY_API_PUBLIC_URL", "https://policy.company.internal")
 
     def handle(self, req):
@@ -32,6 +33,10 @@ class JobWorld(World):
             assert req.headers["authorization"] == ORCH
             self.ended.append(p.split("/")[-2])
             return httpx.Response(200, json={"ended": p.split("/")[-2]})
+        if p == "/v1/agent/jobs/job-1/runs":
+            assert req.headers["authorization"] == ORCH
+            self.results.append(json.loads(req.content)); self.ended_at_result = list(self.ended)
+            return httpx.Response(self.result_status, json={"stored": True} if self.result_status == 200 else {"detail": "boom"})
         if p == "/v1/agent/jobs/due":
             assert req.headers["authorization"] == ORCH
             return httpx.Response(200, json={"jobs": self.due})
@@ -43,11 +48,17 @@ class JobWorld(World):
     def execs(self):
         return [c for c in self.calls() if c["argv"][:2] == ["sandbox", "exec"]]
 
+    def scripts(self, marker):
+        return [c for c in self.execs() if c["argv"][c["argv"].index("--") + 1:][:2] == ["sh", "-c"] and marker in c["argv"][c["argv"].index("--") + 3]]
+
     def task_writes(self):
-        return [c for c in self.execs() if c["argv"][c["argv"].index("--") + 1:][:2] == ["sh", "-c"]]
+        return self.scripts("cat >")
+
+    def diff_runs(self):
+        return self.scripts("git -c core.quotepath=off diff")
 
     def agent_runs(self):
-        return [c["argv"] for c in self.execs() if "clone" not in c["argv"] and c not in self.task_writes()]
+        return [c["argv"] for c in self.execs() if "clone" not in c["argv"] and c not in self.task_writes() and c not in self.diff_runs()]
 
 
 def start(trigger="manual", token="dev:kim"):
@@ -187,3 +198,64 @@ def test_write_file_refuses_input_over_the_stdin_limit():
     from orchestrator.openshell import MAX_EXEC_STDIN_BYTES, OpenShell, OpenShellError
     with pytest.raises(OpenShellError, match="at most"):
         asyncio.run(OpenShell("/nonexistent/openshell").write_file("sb", "/workspace/x", b"x" * (MAX_EXEC_STDIN_BYTES + 1)))
+
+
+def test_run_result_goes_to_the_policy_api_before_teardown(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_AGENT_OUTPUT", "Dependencies updated.\n")
+    monkeypatch.setenv("FAKE_AGENT_LOG", '{"event":"step"}\n')
+    monkeypatch.setenv("FAKE_DIFF", "diff --git a/x b/x\n+1\n")
+    start()
+    [r] = w.results
+    assert r == {"session_id": "sid-1", "returncode": 0, "timed_out": False, "error": None, "output": "Dependencies updated.\n",
+                 "output_truncated": False, "log": '{"event":"step"}\n', "diff": "diff --git a/x b/x\n+1\n", "diff_truncated": False}
+    # The patch is taken in the repository, against what was cloned (agent commits included), before the sandbox goes.
+    [d] = w.diff_runs()
+    assert d["argv"][d["argv"].index("--workdir") + 1] == "/workspace/payments" and "origin/HEAD" in d["argv"][-1]
+    assert w.ended_at_result == [] and w.ended == ["sid-1"]  # stored while the session was still open
+    calls = [c["argv"] for c in w.calls()]
+    assert calls.index(d["argv"]) < calls.index(["sandbox", "delete", "agent-job-job-1-abc-def"])
+
+
+def test_timed_out_run_still_reports_partial_work(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_AGENT_SLEEP", "5")
+    monkeypatch.setenv("FAKE_DIFF", "diff --git a/half b/half\n")
+    w.session["job"]["max_runtime_seconds"] = 0.5
+    start()
+    [r] = w.results
+    assert r["timed_out"] is True and r["returncode"] is None and r["diff"].startswith("diff --git a/half")
+
+
+def test_large_results_are_clipped(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    monkeypatch.setattr(o, "MAX_RESULT_OUTPUT_BYTES", 10)
+    monkeypatch.setattr(o, "MAX_RESULT_LOG_BYTES", 4)
+    monkeypatch.setattr(o, "MAX_RESULT_DIFF_BYTES", 8)
+    monkeypatch.setenv("FAKE_AGENT_OUTPUT", "0123456789abcdef")
+    monkeypatch.setenv("FAKE_AGENT_LOG", "old-log-END!")
+    monkeypatch.setenv("FAKE_DIFF", "diff --git a/x b/x\n")
+    start()
+    [r] = w.results
+    assert (r["output"], r["output_truncated"]) == ("0123456789", True)
+    assert r["log"] == "END!"  # the end of the log is what explains a failure
+    assert (r["diff"], r["diff_truncated"]) == ("diff --g", True)
+
+
+def test_diff_failure_does_not_lose_the_answer(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_AGENT_OUTPUT", "done")
+    monkeypatch.setenv("FAKE_DIFF_RC", "128")
+    start()
+    [r] = w.results
+    assert r["output"] == "done" and r["diff"] == ""
+    exit_event = next(a for a in w.audits if a["event_type"] == "agent.exit")
+    assert "diff not collected (128)" in exit_event["data"]["diff_error"]
+
+
+def test_result_store_failure_still_tears_down(monkeypatch, tmp_path):
+    w = JobWorld(monkeypatch, tmp_path)
+    w.result_status = 500
+    start()
+    assert len(w.results) == 1 and w.ended == ["sid-1"]
+    assert ["sandbox", "delete", "agent-job-job-1-abc-def"] in [c["argv"] for c in w.calls()]

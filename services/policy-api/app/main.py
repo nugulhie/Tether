@@ -18,7 +18,7 @@ from policy_compiler import bundle as bundles
 from . import audit_chain, ocsf
 from .auth import Principal, SESSION_TOKEN_PREFIX, bearer, client_identity, env, hash_token, is_admin, issue_user_token, new_session_token, service_principal, verified_device, verify_user_token
 from .db import Session, migrate
-from .models import AgentJob, AgentSession, AuditEvent, ContentHold, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
+from .models import AgentJob, AgentJobRun, AgentSession, AuditEvent, ContentHold, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
 
 WORKSPACE="/workspace"
 Id=Field(min_length=1,max_length=128)
@@ -699,6 +699,89 @@ def end_session(session_id:str,p:Principal=Depends(require("service",service="sa
                    data={"job_id":s.job_id,"trigger":s.trigger})
         db.commit()
         return {"ended":session_id}
+
+# --- job run results ------------------------------------------------------------------
+# The sandbox (and its workspace) is deleted when a run ends, so what the run produced is kept here
+# for the job's owner: the agent's final answer, the end of its log, and its changes as a patch.
+
+RESULT_PARTS=("output","log","diff")
+
+class RunResultReq(BaseModel):
+    session_id:str=Id; returncode:int|None=None; timed_out:bool=False; error:str|None=Field(default=None,max_length=1000)
+    output:str=Field(default="",max_length=300_000); output_truncated:bool=False
+    log:str=Field(default="",max_length=20_000)
+    diff:str=Field(default="",max_length=2_200_000); diff_truncated:bool=False
+
+def job_for_reader(db,job_id,p):
+    j=db.get(AgentJob,job_id)
+    # Someone else's job looks like no job at all.
+    if not j or (j.owner!=p.user_id and not is_admin(p)): raise HTTPException(404,"job not found")
+    return j
+
+@app.post("/v1/agent/jobs/{job_id}/runs")
+def store_run_result(job_id:str,req:RunResultReq,p:Principal=Depends(require("service",service="sandbox-orchestrator"))):
+    with Session() as db:
+        s=db.get(AgentSession,req.session_id)
+        if not s or s.job_id!=job_id: raise HTTPException(404,"no session of this job with this id")
+        if db.get(AgentJobRun,s.id): raise HTTPException(409,"the result of this run is already stored")
+        try: f=content_cipher()
+        except HTTPException: f=None  # no key: keep the outcome, not the bodies (never store them in the clear)
+        run=AgentJobRun(session_id=s.id,job_id=job_id,returncode=req.returncode,timed_out=req.timed_out,error=req.error,
+                        output_truncated=req.output_truncated,diff_truncated=req.diff_truncated,finished_at=now())
+        parts={}
+        for part in RESULT_PARTS:
+            text=getattr(req,part)
+            if not text or f is None: continue
+            raw=text.encode()
+            row=LlmContent(id=str(uuid.uuid4()),session_id=s.id,request_id="job-run",direction=f"job.{part}",sha256=hashlib.sha256(raw).hexdigest(),
+                           size=len(raw),truncated=getattr(req,f"{part}_truncated",False),ciphertext=f.encrypt(raw))
+            db.add(row); setattr(run,f"{part}_content_id",row.id); parts[part]={"content_id":row.id,"sha256":row.sha256,"size":row.size}
+        db.add(run)
+        record(db,"agent.job.result",Principal(kind="user",user_id=s.user_id,device_id=s.device_id),source=p.user_id,session_id=s.id,
+               success=req.returncode==0 and not req.timed_out,
+               data={"job_id":job_id,"returncode":req.returncode,"timed_out":req.timed_out,"error":req.error,"parts":parts,"bodies_stored":f is not None})
+        db.commit()
+        return {"stored":s.id,"parts":sorted(parts)}
+
+def run_view(s,run,token):
+    if run: status="finished"
+    elif token and utc(token.expires_at)>now(): status="running"
+    else: status="ended"  # ended without a result: revoked, or the orchestrator stopped mid-run
+    v={"session_id":s.id,"trigger":s.trigger,"triggered_by":s.triggered_by,"started_at":utc(s.created_at).isoformat(),"status":status}
+    if run:
+        v.update(returncode=run.returncode,timed_out=run.timed_out,error=run.error,finished_at=utc(run.finished_at).isoformat(),
+                 output_truncated=run.output_truncated,diff_truncated=run.diff_truncated,
+                 has_output=run.output_content_id is not None,has_diff=run.diff_content_id is not None)
+    return v
+
+@app.get("/v1/agent/jobs/{job_id}/runs")
+def list_runs(job_id:str,p:Principal=Depends(require("user"))):
+    """Runs of your job, newest first (administrators: any job)."""
+    with Session() as db:
+        job_for_reader(db,job_id,p)
+        sessions=db.scalars(select(AgentSession).where(AgentSession.job_id==job_id).order_by(AgentSession.created_at.desc()).limit(100))
+        return {"runs":[run_view(s,db.get(AgentJobRun,s.id),db.get(SessionToken,s.id)) for s in sessions]}
+
+@app.get("/v1/agent/jobs/{job_id}/runs/{session_id}")
+def read_run(job_id:str,session_id:str,p:Principal=Depends(require("user"))):
+    """One run with its answer, log tail and patch. A body past the retention period is gone (null)."""
+    with Session() as db:
+        job_for_reader(db,job_id,p)
+        s=db.get(AgentSession,session_id)
+        if not s or s.job_id!=job_id: raise HTTPException(404,"run not found")
+        run=db.get(AgentJobRun,s.id); v=run_view(s,run,db.get(SessionToken,s.id))
+        if run:
+            f=None
+            for part in RESULT_PARTS:
+                cid=getattr(run,f"{part}_content_id"); row=db.get(LlmContent,cid) if cid else None
+                if row is None: v[part]=None; continue
+                f=f or content_cipher()
+                try: v[part]=f.decrypt(row.ciphertext).decode()
+                except InvalidToken: raise HTTPException(500,"content cannot be decrypted with the configured key")
+            v["purged"]=any(getattr(run,f"{part}_content_id") and v[part] is None for part in RESULT_PARTS)
+            record(db,"agent.job.result.read",p,source="policy-api",session_id=s.id,data={"job_id":job_id,"owner_read":p.user_id==db.get(AgentJob,job_id).owner})
+            db.commit()
+        return v
 
 # --- guardrail break-glass (ADR 0001, D4) -------------------------------------------
 
