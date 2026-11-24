@@ -128,9 +128,9 @@ static_resources:
     load_assignment:
       cluster_name: llm_gateway
       endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: llm-gateway, port_value: 8082}}}}]}]
-  - name: orchestrator
-    type: STRICT_DNS
+  - name: orchestrator          # host network, bound to the compose network's gateway address
+    type: STATIC
     connect_timeout: 5s
     load_assignment:
       cluster_name: orchestrator
-      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: sandbox-orchestrator, port_value: 8083}}}}]}]
+      endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: 172.30.0.1, port_value: 8083}}}}]}]

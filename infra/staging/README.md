@@ -19,6 +19,7 @@ Mac:      tether CLI → 오케스트레이터
 | 3 | `30-control-plane.sh` | 아니오 | `infra/.env`에 호스트별 키·토큰 생성(600), compose를 `compose.staging.yml`과 함께 기동(포트는 127.0.0.1만, postgres 비공개), interceptor는 gateway JWT 검증을 켜고 `$XDG_RUNTIME_DIR/tether/` unix 소켓에서 대기 | 스크립트 상단 주석 |
 | 4 | `40-gateway-config.sh` | 아니오 | `infra/openshell/gateway.toml`에 staging 소켓 경로를 넣어 `~/.config/openshell/gateway.toml`로 설치, `config preflight` 후 재시작. `binding_policy = "exact"`라 재시작 성공이 곧 바인딩 일치 확인 | 스크립트 상단 주석 |
 | 5 | `50-e2e.py` | 아니오 | 실제 gateway에 대고 세션 발급 → 프로바이더 → 샌드박스 생성 → 내부 검사(사용자, 파일시스템, egress, 바이너리 고정) → 정책 확대 시도 → 킬 스위치까지 19개 항목 확인. 종료 코드 = 실패 수 | 스스로 정리 |
+| 6 | `80-publish-policies.sh` (**Mac**) | 아니오 | 정책 디렉터리를 Mac의 Ed25519 키(`~/.tether-pki/policy-signing.key`)로 서명해 발행. 서버에는 공개키만. `AUTH_MODE=mtls`에서는 서명된 번들만 받는다 | 이전 정책을 다시 발행(새 serial) |
 | 7 | `70-backup.sh` (**Mac**) | 아니오 | 서버 DB 덤프와 `.env`를 Mac(`~/TetherBackups`)으로 가져오고 감사 해시 체인을 검증, 지난번 head가 그대로인지 비교. 이상하면 macOS 알림. `--install`로 매일 12:30 | `--uninstall` |
 
 `install.sh`를 `main`에서 받아 파이프로 실행하지 않고, 릴리스 .deb를 고정 해시로 설치합니다.
@@ -77,3 +78,8 @@ LLM gateway ─mTLS(llm-gateway.tether.internal)─▶ inference-proxy :8443 (�
 - 관리자 1명: `SINGLE_ADMIN_APPROVAL=1`로 자기 job 승인 허용, 감사 기록에 `self_approved: true`.
 - 감사 로그 해시 체인(마이그레이션 0010, `python -m app.audit_chain`, `GET /v1/admin/audit/chain`). 확인: 내용 변조는 체인 검증에서, 해시까지 다시 계산한 변조는 Mac에 저장한 head 비교에서 경보. 백업 덤프를 임시 DB에 복원해 확인.
 - e2e 26개 통과(`AUTH_MODE=mtls`, dev 토큰 거부 포함).
+
+## 2026-11-24 orchestrator 실제 경로
+- orchestrator 컨테이너는 호스트 네트워크에서 OpenShell CLI(정적 바이너리)와 gateway 클라이언트 인증서를 읽기 전용으로 받아 gateway(127.0.0.1:17670)를 호출한다. API는 172.30.0.1:8083(컴포즈 네트워크 게이트웨이 주소)에만 열려 tls-front만 닿는다.
+- GitHub App이 없어 staging 정책은 `github.org: nugulhie`, permissions 없음(github-org 프로바이더 없음): 공개 저장소를 익명으로 clone만 한다.
+- 관리자 Mac에서 실제 경로로 확인: 인증서 로그인 → job 등록 → 자기 승인(`self_approved`) → `POST /v1/jobs/{id}/run`(tls-front → orchestrator) → 세션·샌드박스 생성, `nugulhie/Tether` clone → `tether-agent`가 qwen3.5:122b로 README 요약(`llm.request` 200 두 번, `agent.exit` 0) → 샌드박스 삭제, 세션 종료. 응답 본문은 사유를 적어야 열람된다(`reason`).

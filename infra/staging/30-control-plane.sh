@@ -34,6 +34,7 @@ export TETHER_TLS_DIR=$HOME/.local/state/tether/tls
 for f in front.crt front.key inference.crt inference.key llm-gateway-client.crt llm-gateway-client.key service-ca.pem user-ca.pem user-ca.crl; do
   test -r "$TETHER_TLS_DIR/$f" || { echo "missing $TETHER_TLS_DIR/$f (run infra/staging/60-tls.sh from the admin machine)" >&2; exit 1; }
 done
+test -r "$HOME/.local/state/tether/policy/bundle.pub" || { echo "missing policy signing public key (run infra/staging/80-publish-policies.sh from the admin machine)" >&2; exit 1; }
 export ENVOY_IMAGE=${ENVOY_IMAGE:-envoyproxy/envoy:v1.34.1@sha256:007da57c2c328a90bd4e6d99b70bd899132f1b4a9426ccafe25437cf84a60c14}
 
 # Company provider profiles with the platform hosts as sandboxes see them on this host.

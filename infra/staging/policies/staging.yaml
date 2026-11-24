@@ -2,7 +2,7 @@
 # Same as policies/backend-dev.yaml plus the self-hosted model (Ollama on the GPU server) and the local agent
 # binary, which only tether-agent may use to reach the LLM gateway.
 policy_id: staging-local-llm
-version: 1
+version: 2
 priority: 10
 description: Staging - development policy with the self-hosted model.
 match:
@@ -21,8 +21,9 @@ aws:
   role: null
   duration_seconds: 3600
 github:
-  org: your-org
-  permissions: {contents: write, pull_requests: write, metadata: read}
+  # No GitHub App on staging yet: no github-org provider (no permissions), so agents clone this account's
+  # public repositories anonymously and cannot push. Set the company org and permissions with the App.
+  org: nugulhie
 llm:
   local: {models: ["qwen3.5:*"]}
   max_requests_per_minute: 120

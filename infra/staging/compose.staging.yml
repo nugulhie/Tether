@@ -30,10 +30,14 @@ services:
       IDENTITY_PROXY_ADDRESSES: 172.30.0.20/32      # tls-front only
       ADMIN_USERS: ${TETHER_ADMIN_USERS:?}
       SINGLE_ADMIN_APPROVAL: "1"
+      # Policies arrive as bundles signed on the admin machine (80-publish-policies.sh).
+      POLICY_BUNDLE_PUBLIC_KEY_FILE: /etc/tether/policy-bundle.pub
       PLATFORM_LLM_GATEWAY_HOST: host.openshell.internal
       PLATFORM_POLICY_API_HOST: host.openshell.internal
       PLATFORM_LOCAL_INFERENCE_HOSTS: gpu.tether.internal
-    volumes: !override ["./staging/policies:/policies:ro"]
+    volumes: !override
+      - ./staging/policies:/policies:ro
+      - ${HOME:?}/.local/state/tether/policy/bundle.pub:/etc/tether/policy-bundle.pub:ro
   credential-broker:
     ports: !override ["127.0.0.1:8081:8081"]
   llm-gateway:
@@ -52,8 +56,22 @@ services:
       - ${TETHER_TLS_DIR:?}/llm-gateway-client.key:/etc/tether/tls/llm-gateway-client.key:ro
       - ${TETHER_TLS_DIR:?}/service-ca.pem:/etc/tether/tls/service-ca.pem:ro
   sandbox-orchestrator:
-    ports: !override ["127.0.0.1:8083:8083"]
+    # Host network: the OpenShell gateway listens on host loopback (127.0.0.1:17670). The API binds the compose
+    # network's gateway address, reachable from tls-front but not from the LAN. The OpenShell CLI (static
+    # binary) and the gateway's client identity are mounted read-only; nothing else on this host gets them.
+    network_mode: host
+    ports: !reset []
+    command: ["uvicorn", "orchestrator.main:app", "--host", "172.30.0.1", "--port", "8083"]
+    volumes:
+      - /usr/bin/openshell:/usr/local/bin/openshell:ro
+      - ${HOME:?}/.config/openshell/active_gateway:/root/.config/openshell/active_gateway:ro
+      - ${HOME:?}/.config/openshell/gateways/openshell:/root/.config/openshell/gateways/openshell:ro
     environment:
+      HOME: /root
+      POLICY_API: http://127.0.0.1:8080
+      CREDENTIAL_BROKER: http://127.0.0.1:8081
+      # No GitHub App on staging yet: the staging policy clones public repositories of this account read-only.
+      GITHUB_ORG: nugulhie
       LLM_GATEWAY_URL: https://host.openshell.internal
       POLICY_API_PUBLIC_URL: https://host.openshell.internal
       DEVICE_ID_HEADER: x-tether-client-serial   # set by tls-front from the verified certificate
