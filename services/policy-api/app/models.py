@@ -68,6 +68,9 @@ class AuditEvent(Base):
     event_type: Mapped[str] = mapped_column(String(128))
     payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    # Hash chain (app/audit_chain.py); NULL for events written before migration 0010.
+    prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, exists, func, or_, select
 from policy_compiler import PolicyError, compile_policy, policy_hash, static_part
 from policy_compiler import bundle as bundles
-from . import ocsf
+from . import audit_chain, ocsf
 from .auth import Principal, SESSION_TOKEN_PREFIX, bearer, client_identity, env, hash_token, is_admin, issue_user_token, new_session_token, service_principal, verified_device, verify_user_token
 from .db import Session, migrate
 from .models import AgentJob, AgentSession, AuditEvent, ContentHold, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
@@ -65,7 +65,7 @@ def require(*kinds,service=()):
 
 def record(db,event_type,principal,*,source,session_id=None,**kw):
     evt=ocsf.build(event_type,user_id=principal.user_id,device_id=principal.device_id,device_verified=principal.device_verified,session_id=session_id or principal.session_id,source=source,**kw)
-    db.add(AuditEvent(event_type=event_type,payload=evt)); ocsf.emit(evt)
+    audit_chain.append(db,event_type,evt); ocsf.emit(evt)
 
 # --- policies ---------------------------------------------------------------
 
@@ -542,6 +542,11 @@ async def purge_loop(interval):
         try: await asyncio.to_thread(purge_contents,RETENTION_ACTOR,trigger="schedule")
         except Exception: log.exception("content purge failed")
         await asyncio.sleep(interval)
+
+@app.get("/v1/admin/audit/chain")
+def audit_chain_status(p:Principal=Depends(require("admin","service",service="siem"))):
+    """Verify the audit hash chain; compare head_hash with a copy kept off the server."""
+    with Session() as db: return audit_chain.verify(db)
 
 @app.post("/v1/admin/audit/content/purge")
 def purge_content(dry_run:bool=False,p:Principal=Depends(require("admin"))):

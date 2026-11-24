@@ -15,8 +15,10 @@ Mac:      tether CLI → 오케스트레이터
 | 1 | `10-docker.sh` | 예 | Docker 공식 apt 저장소(키 지문 확인)에서 Docker Engine 설치, 사용자를 `docker` 그룹에 추가 | 스크립트 상단 주석 |
 | 2 | `20-openshell.sh` | 예 | OpenShell v0.1.9 .deb를 SHA-256으로 확인 후 설치, gateway를 사용자 systemd 서비스로 시작(`https://127.0.0.1:17670`), Docker 드라이버 고정, 텔레메트리 끔, linger 켬, CLI에 gateway 등록 | 스크립트 상단 주석 |
 | 2.5 | `60-tls.sh` (**관리자 Mac에서**) | 아니오 | Mac의 `~/.tether-pki`에 CA 2개(서비스용: 이름 제한, 개인용) 생성. 서버에서 키·CSR 생성 → Mac에서 서명 → 인증서만 서버로(`~/.local/state/tether/tls`). 재실행하면 갱신 | `rm -rf ~/.local/state/tether/tls` |
+| 2.6 | `infra/pki/tether-pki.sh user <이름>` (**Mac**) | 아니오 | 직원 인증서 발급(90일). 관리자는 서버 `infra/.env`의 `TETHER_ADMIN_USERS`. 퇴사·분실: `tether-pki.sh revoke <이름>` → `60-tls.sh` 재실행 → `docker restart infra-tls-front-1` | `revoke` |
 | 3 | `30-control-plane.sh` | 아니오 | `infra/.env`에 호스트별 키·토큰 생성(600), compose를 `compose.staging.yml`과 함께 기동(포트는 127.0.0.1만, postgres 비공개), interceptor는 gateway JWT 검증을 켜고 `$XDG_RUNTIME_DIR/tether/` unix 소켓에서 대기 | 스크립트 상단 주석 |
 | 4 | `40-gateway-config.sh` | 아니오 | `infra/openshell/gateway.toml`에 staging 소켓 경로를 넣어 `~/.config/openshell/gateway.toml`로 설치, `config preflight` 후 재시작. `binding_policy = "exact"`라 재시작 성공이 곧 바인딩 일치 확인 | 스크립트 상단 주석 |
+| 7 | `70-backup.sh` (**Mac**) | 아니오 | 서버 DB 덤프와 `.env`를 Mac(`~/TetherBackups`)으로 가져오고 감사 해시 체인을 검증, 지난번 head가 그대로인지 비교. 이상하면 macOS 알림. `--install`로 매일 12:30 | `--uninstall` |
 | 5 | `50-e2e.py` | 아니오 | 실제 gateway에 대고 세션 발급 → 프로바이더 → 샌드박스 생성 → 내부 검사(사용자, 파일시스템, egress, 바이너리 고정) → 정책 확대 시도 → 킬 스위치까지 19개 항목 확인. 종료 코드 = 실패 수 | 스스로 정리 |
 
 `install.sh`를 `main`에서 받아 파이프로 실행하지 않고, 릴리스 .deb를 고정 해시로 설치합니다.
@@ -68,3 +70,10 @@ LLM gateway ─mTLS(llm-gateway.tether.internal)─▶ inference-proxy :8443 (�
 - Ollama, GPU 드라이버, SSH 설정은 이 단계에서 건드리지 않습니다.
 - 샌드박스에서 본 호스트 주소: OpenShell은 loopback(`127.0.0.0/8`), link-local, unspecified 목적지를 `allowed_ips`로도 허용하지 않습니다. 단일 호스트라도 샌드박스가 부르는 LLM gateway와 Policy API는 `host.openshell.internal`(Docker 드라이버가 샌드박스에 넣어 주는 호스트 별칭) 또는 서버의 LAN IP로 지정하고, 그 이름이 LLM gateway·Policy API TLS 인증서의 SAN에 들어 있어야 합니다. `PLATFORM_LLM_GATEWAY_HOST`, `PLATFORM_POLICY_API_HOST`, 오케스트레이터의 `LLM_GATEWAY_URL`, `POLICY_API_PUBLIC_URL`, 그리고 `openshell/profiles`의 호스트가 같은 이름이어야 합니다. `localhost`/`127.0.0.1`을 쓰면 정책은 로드되어도 연결이 거부됩니다.
 - Gateway 설정은 `infra/openshell/gateway.toml`을 기준으로 `~/.config/openshell/gateway.toml`에 두고, 서버에서 `openshell-gateway config preflight --path ~/.config/openshell/gateway.toml`로 검증한 뒤 재시작합니다(로컬 개발 환경에는 `openshell-gateway`가 없어 이 검증은 staging 단계에서만 가능합니다). 같은 호스트의 interceptor는 `INTERCEPTOR_LISTEN=unix:///run/tether/gateway-interceptor.sock`, `GATEWAY_ID=openshell`, `GATEWAY_EXTENSION_PUBLIC_KEY_FILE=~/.local/state/openshell/tls/jwt/public.pem`으로 띄웁니다.
+
+## 2026-11-24 사람 식별(SSO 없음)과 백업
+- 직원은 개인 인증서로 식별한다(`AUTH_MODE=mtls`). 직원 Mac → `https://192.168.1.27`(인증서 필수, CRL 확인) → `POST /v1/auth/token`이 1시간 토큰 발급. Policy API는 인증서 이름 헤더를 tls-front 주소(172.30.0.20)에서 온 것만 믿는다. CLI 설정: `TETHER_ORCHESTRATOR=https://192.168.1.27`, `TETHER_CLIENT_CERT`, `TETHER_CLIENT_KEY`, `TETHER_CA_BUNDLE=<service-ca.crt>`; `tether login`은 인증서로 조용히 토큰을 받는다.
+- 확인(관리자 Mac에서): 인증서 없음 거부, 다른 사람 인증서로 신원 헤더를 위조해도 실제 인증서 이름으로 덮어씀, 비관리자는 관리 API 403, 서버에서 Policy API 포트로 직접 헤더 위조 403, 샌드박스 리스너의 `/v1/auth/` 404, 폐기한 인증서 `certificate revoked`.
+- 관리자 1명: `SINGLE_ADMIN_APPROVAL=1`로 자기 job 승인 허용, 감사 기록에 `self_approved: true`.
+- 감사 로그 해시 체인(마이그레이션 0010, `python -m app.audit_chain`, `GET /v1/admin/audit/chain`). 확인: 내용 변조는 체인 검증에서, 해시까지 다시 계산한 변조는 Mac에 저장한 head 비교에서 경보. 백업 덤프를 임시 DB에 복원해 확인.
+- e2e 26개 통과(`AUTH_MODE=mtls`, dev 토큰 거부 포함).
