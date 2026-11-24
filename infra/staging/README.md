@@ -13,7 +13,9 @@ Mac:      tether CLI → 오케스트레이터
 |---|---|---|---|---|
 | 0 | `00-preflight.sh` | 아니오 | 읽기 전용 점검(OS, cgroups v2, GPU, Ollama 바인딩, 런타임, 포트) | 없음 |
 | 1 | `10-docker.sh` | 예 | Docker 공식 apt 저장소(키 지문 확인)에서 Docker Engine 설치, 사용자를 `docker` 그룹에 추가 | 스크립트 상단 주석 |
-| 2 | `20-openshell.sh` | 예 | OpenShell v0.1.9 .deb를 SHA-256으로 확인 후 설치, gateway를 사용자 systemd 서비스로 시작(`https://127.0.0.1:17670`), 텔레메트리 끔, linger 켬 | 스크립트 상단 주석 |
+| 2 | `20-openshell.sh` | 예 | OpenShell v0.1.9 .deb를 SHA-256으로 확인 후 설치, gateway를 사용자 systemd 서비스로 시작(`https://127.0.0.1:17670`), Docker 드라이버 고정, 텔레메트리 끔, linger 켬, CLI에 gateway 등록 | 스크립트 상단 주석 |
+| 3 | `30-control-plane.sh` | 아니오 | `infra/.env`에 호스트별 키·토큰 생성(600), compose를 `compose.staging.yml`과 함께 기동(포트는 127.0.0.1만, postgres 비공개), interceptor는 gateway JWT 검증을 켜고 `$XDG_RUNTIME_DIR/tether/` unix 소켓에서 대기 | 스크립트 상단 주석 |
+| 4 | `40-gateway-config.sh` | 아니오 | `infra/openshell/gateway.toml`에 staging 소켓 경로를 넣어 `~/.config/openshell/gateway.toml`로 설치, `config preflight` 후 재시작. `binding_policy = "exact"`라 재시작 성공이 곧 바인딩 일치 확인 | 스크립트 상단 주석 |
 
 `install.sh`를 `main`에서 받아 파이프로 실행하지 않고, 릴리스 .deb를 고정 해시로 설치합니다.
 
@@ -26,7 +28,17 @@ exit                                   # docker 그룹 반영을 위해 다시 �
 ssh soldoc@192.168.1.27
 bash ~/tether-staging/20-openshell.sh
 bash ~/tether-staging/00-preflight.sh  # Docker, OpenShell이 [ok]인지 확인
+# 저장소를 ~/tether에 둔 뒤(sudo 불필요)
+cd ~/tether && bash infra/staging/30-control-plane.sh && bash infra/staging/40-gateway-config.sh
 ```
+
+`10-docker.sh` 뒤에 이미 열려 있던 터미널(데스크톱, tmux)에는 docker 그룹이 반영되지 않습니다. 새로 SSH로 접속하거나 `sg docker -c "bash ~/tether-staging/20-openshell.sh"`로 실행합니다. 같은 이유로, 그 전에 시작된 사용자 systemd 관리자 아래의 gateway도 Docker 소켓을 열지 못합니다(`no compute driver configured`). `20-openshell.sh`는 이 경우 gateway만 `sg docker`로 띄우는 drop-in(`~/.config/systemd/user/openshell-gateway.service.d/10-docker-group.conf`)을 둡니다. setuid인 `sg`는 `PrivateTmp`가 만드는 user namespace에서 실패하므로 drop-in에서 `PrivateTmp=false`로 둡니다. 재부팅 뒤에는 필요 없으니 지워도 됩니다.
+
+## 2026-11-24 staging 검증 결과 (OpenShell 0.1.9, Docker 29.10)
+- `gateway.toml` preflight 통과, 고의로 깨뜨린 설정은 거부됨
+- gateway가 interceptor 바인딩 21개를 `exact`로 수용하고 기동, 프로파일 출처는 `interceptor/tether-governance`뿐
+- 실제 gateway에서 거부 확인: 발급되지 않은 샌드박스 생성, 프로파일 import·삭제, 전역 정책 설정, 기본 `github` 프로바이더 생성(프로파일 없음), 발급되지 않은 회사 프로바이더 생성
+- 아직: 발급된 세션으로 샌드박스 생성(이미지 digest 고정, 샌드박스→LLM gateway TLS), envoy mTLS→Ollama, 방화벽, GGUF 서명
 
 ## 주의
 - `docker` 그룹은 root와 같은 권한입니다. staging 전용으로 받아들이고, 운영에서는 gateway 전용 계정을 씁니다.
