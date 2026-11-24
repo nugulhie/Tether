@@ -18,8 +18,8 @@ Mac:      tether CLI → 오케스트레이터
 | 2.6 | `infra/pki/tether-pki.sh user <이름>` (**Mac**) | 아니오 | 직원 인증서 발급(90일). 관리자는 서버 `infra/.env`의 `TETHER_ADMIN_USERS`. 퇴사·분실: `tether-pki.sh revoke <이름>` → `60-tls.sh` 재실행 → `docker restart infra-tls-front-1` | `revoke` |
 | 3 | `30-control-plane.sh` | 아니오 | `infra/.env`에 호스트별 키·토큰 생성(600), compose를 `compose.staging.yml`과 함께 기동(포트는 127.0.0.1만, postgres 비공개), interceptor는 gateway JWT 검증을 켜고 `$XDG_RUNTIME_DIR/tether/` unix 소켓에서 대기 | 스크립트 상단 주석 |
 | 4 | `40-gateway-config.sh` | 아니오 | `infra/openshell/gateway.toml`에 staging 소켓 경로를 넣어 `~/.config/openshell/gateway.toml`로 설치, `config preflight` 후 재시작. `binding_policy = "exact"`라 재시작 성공이 곧 바인딩 일치 확인 | 스크립트 상단 주석 |
-| 7 | `70-backup.sh` (**Mac**) | 아니오 | 서버 DB 덤프와 `.env`를 Mac(`~/TetherBackups`)으로 가져오고 감사 해시 체인을 검증, 지난번 head가 그대로인지 비교. 이상하면 macOS 알림. `--install`로 매일 12:30 | `--uninstall` |
 | 5 | `50-e2e.py` | 아니오 | 실제 gateway에 대고 세션 발급 → 프로바이더 → 샌드박스 생성 → 내부 검사(사용자, 파일시스템, egress, 바이너리 고정) → 정책 확대 시도 → 킬 스위치까지 19개 항목 확인. 종료 코드 = 실패 수 | 스스로 정리 |
+| 7 | `70-backup.sh` (**Mac**) | 아니오 | 서버 DB 덤프와 `.env`를 Mac(`~/TetherBackups`)으로 가져오고 감사 해시 체인을 검증, 지난번 head가 그대로인지 비교. 이상하면 macOS 알림. `--install`로 매일 12:30 | `--uninstall` |
 
 `install.sh`를 `main`에서 받아 파이프로 실행하지 않고, 릴리스 .deb를 고정 해시로 설치합니다.
 
