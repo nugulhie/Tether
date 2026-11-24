@@ -277,6 +277,14 @@ def test_local_model_allowlist(monkeypatch, model):
     assert r.status_code == 403 and w.upstream == []
 
 
+def test_model_outside_policy_is_audited(monkeypatch):
+    w = local_world(monkeypatch)
+    assert local_post(client(), body=json.dumps({"model": "other-local", "messages": []}).encode()).status_code == 403
+    e = events(w, "llm.denied")[-1]
+    assert e["success"] is False and e["data"] == {"provider": "local", "path": "/v1/chat/completions", "model": "other-local"}
+    assert w.upstream == [] and w.contents == []  # refused before anything is stored or sent
+
+
 def test_local_needs_a_local_grant(monkeypatch):
     w = local_world(monkeypatch, session=SESSION)
     assert local_post(client()).status_code == 403 and w.upstream == []

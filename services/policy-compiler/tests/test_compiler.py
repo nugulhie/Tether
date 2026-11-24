@@ -192,6 +192,24 @@ def test_rejects_local_inference_hosts(host):
         compile_policy(policy(network={"allow": [host]}), platform=GPU)
 
 
+@pytest.mark.parametrize("host", ["host.openshell.internal", "HOST.docker.internal", "localhost", "x.localhost"])
+def test_rejects_host_aliases(host):
+    with pytest.raises(PolicyError, match="host aliases"):
+        compile_policy(policy(network={"allow": [host]}, github=None))
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "192.168.1.27", "10.0.0.1"])
+def test_rejects_address_literals(host):
+    with pytest.raises(PolicyError, match="not addresses"):
+        compile_policy(policy(network={"allow": [host]}, github=None))
+
+
+def test_rejects_platform_hosts_in_allow():
+    with pytest.raises(PolicyError, match="platform hosts"):
+        compile_policy(policy(network={"allow": ["llm.company.internal"]}, github=None),
+                       platform={"llm_gateway_host": "llm.company.internal", "policy_api_host": "policy.company.internal"})
+
+
 def test_local_inference_hosts_list_form_and_unrelated_hosts_pass():
     compile_policy(policy(network={"allow": ["notgpu.company.internal", "pypi.org"]}, github=None),
                    platform={"local_inference_hosts": ["gpu.company.internal"]})

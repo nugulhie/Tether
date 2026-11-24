@@ -125,6 +125,15 @@ def rate_limit(s: dict):
     _rate[s["session_id"]] = window
 
 
+def requested_model(body: bytes):
+    """The model a request names, for the audit record only (bounded; None if unreadable)."""
+    try:
+        model = json.loads(body).get("model")
+    except (ValueError, AttributeError):
+        return None
+    return model[:200] if isinstance(model, str) else None
+
+
 def check_model(s: dict, provider: str, body: bytes):
     allowed = ((s.get("llm") or {}).get(provider) or {}).get("models") or []
     if not allowed:
@@ -301,7 +310,13 @@ async def proxy(provider: str, path: str, request: Request):
     s = await resolve_session(session_token(request))
     rate_limit(s)
     body = await request.body()
-    model = check_model(s, provider, body) if request.method == "POST" else None
+    try:
+        model = check_model(s, provider, body) if request.method == "POST" else None
+    except HTTPException as e:
+        if e.status_code == 403:
+            # A model outside the policy is a signal worth keeping (probing, misconfigured agent).
+            await report(s, "llm.denied", e.detail, {"provider": provider, "path": path, "model": requested_model(body)}, success=False)
+        raise
     request_id = uuid.uuid4().hex
     bypass = active_bypass(s, model)
     guards = None if bypass else s.get("guardrails")

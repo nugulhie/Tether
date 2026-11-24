@@ -6,6 +6,7 @@ must not build OpenShell policy on its own.
 """
 import hashlib
 import json
+import ipaddress
 import posixpath
 import re
 import sys
@@ -25,6 +26,12 @@ SANDBOX_IDENTITY = "sandbox"
 MODEL_HOSTS = {"anthropic.com", "claude.ai", "claude.com", "openai.com", "chatgpt.com", "oaistatic.com",
                "googleapis.com", "x.ai", "mistral.ai", "cohere.com", "cohere.ai", "deepseek.com", "groq.com", "together.xyz",
                "openrouter.ai", "fireworks.ai", "perplexity.ai"}
+
+
+# Names that resolve to the sandbox host itself. OpenShell maps host.openshell.internal to host loopback, so an
+# allow entry for it would open every host service on that port (inference engine, proxies' admin ports).
+HOST_ALIASES = {"localhost", "host.openshell.internal", "host.docker.internal", "host.containers.internal",
+                "gateway.docker.internal"}
 
 
 # Model grants the LLM gateway understands; "local" is the self-hosted (GPU) inference backend.
@@ -48,6 +55,14 @@ def _host_in(host, domains):
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
+def _is_address(host):
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
 def _platform_list(platform, key):
     v = (platform or {}).get(key) or []
     return [x.strip().lower() for x in (v.split(",") if isinstance(v, str) else v) if x and x.strip()]
@@ -69,6 +84,17 @@ def validate(p, platform=None):
     for h in hosts:
         if not h or "/" in h or ":" in h or "*" in h:
             raise PolicyError(f"network.allow entries must be bare hostnames: {h!r}")
+    addresses = [h for h in hosts if _is_address(h)]
+    if addresses:
+        raise PolicyError(f"network.allow entries must be host names, not addresses: {addresses}")
+    alias = {h for h in hosts if _host_in(h.lower(), HOST_ALIASES)}
+    if alias:
+        raise PolicyError(f"host aliases must not be allowed (they reach the sandbox host): {sorted(alias)}")
+    # The platform endpoints are compiled in for agent binaries only; an allow entry would open them to every
+    # network binary (and with any method).
+    plat = {h for h in hosts if _host_in(h.lower(), [*_platform_list(platform, "llm_gateway_host"), *_platform_list(platform, "policy_api_host")])}
+    if plat:
+        raise PolicyError(f"platform hosts must not be listed in network.allow: {sorted(plat)}")
     # Models are reachable only through the company LLM gateway (platform endpoint).
     direct = {h for h in hosts if _host_in(h, MODEL_HOSTS)}
     if direct:

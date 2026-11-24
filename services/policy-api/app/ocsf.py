@@ -26,6 +26,7 @@ EVENT_TYPES = {
     "session.revoke": (API_ACTIVITY, 4, "Delete"),
     "llm.request": (API_ACTIVITY, 1, "Create"),
     "llm.content": (API_ACTIVITY, 1, "Create"),
+    "llm.denied": (API_ACTIVITY, 99, "Other"),
     "audit.content.read": (API_ACTIVITY, 2, "Read"),
     "audit.content.hold.start": (API_ACTIVITY, 1, "Create"),
     "audit.content.hold.end": (API_ACTIVITY, 4, "Delete"),
@@ -44,7 +45,7 @@ EVENT_TYPES = {
 # which is the only component that can create, attach to or delete sandboxes.
 CLIENT_EVENT_TYPES: set[str] = set()
 # Which service may report which event types.
-SERVICE_EVENT_TYPES = {"credential-broker": {"credential.issue"}, "llm-gateway": {"llm.request", "guardrail.block", "guardrail.error"},
+SERVICE_EVENT_TYPES = {"credential-broker": {"credential.issue"}, "llm-gateway": {"llm.request", "llm.denied", "guardrail.block", "guardrail.error"},
                        "sandbox-orchestrator": {"sandbox.create", "sandbox.reuse", "agent.exit", "sandbox.delete"}}
 
 log = logging.getLogger("audit")
