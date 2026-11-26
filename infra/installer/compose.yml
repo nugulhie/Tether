@@ -1,0 +1,175 @@
+# Tether control plane as installed by tether-install (docs/install-design.md, step 8). Project name "tether".
+# The single-server layout proven on the reference server (infra/docker-compose.yml + infra/staging/compose.staging.yml),
+# as one file with no build sections: every image comes from the bundle and is checked against MANIFEST.json
+# (image ID) before anything starts. Values come from /etc/tether/compose.env (mode 600, written by tether-install).
+#
+# - Published ports are bound to 127.0.0.1, except tls-front's people listener (TETHER_ADDRESS:443, client
+#   certificate from the user CA required). Postgres is not published.
+# - Sandboxes reach the platform at https://host.openshell.internal (host loopback): tls-front 127.0.0.1:443.
+# - The OpenShell gateway runs on the host as the system service tether-openshell-gateway (user "tether");
+#   the interceptor serves it on /run/tether/gateway-interceptor.sock as that user.
+# - Migrations are not run on startup (MIGRATE_ON_STARTUP=0): tether-install runs them as a step.
+name: tether
+networks:
+  default:
+    ipam:
+      config: [{subnet: 172.30.0.0/24}]   # llm-gateway and tls-front have fixed addresses (firewall, identity headers)
+# Sandbox images live in the local registry container "tether-registry" (127.0.0.1:5000), started by
+# tether-install before this file: their registry digests are what SANDBOX_IMAGE and ALLOWED_SANDBOX_IMAGES pin.
+volumes:
+  postgres_data:
+  broker_data:
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:?}
+    environment:
+      POSTGRES_DB: tether
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d tether"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  policy-api:
+    image: tether/policy-api:${TETHER_VERSION:?}
+    environment:
+      DATABASE_URL: postgresql+psycopg://agent:${POSTGRES_PASSWORD:?}@postgres:5432/tether
+      MIGRATE_ON_STARTUP: "0"
+      AUTH_MODE: mtls
+      USER_TOKEN_KEY: ${USER_TOKEN_KEY:?}
+      IDENTITY_PROXY_ADDRESSES: 172.30.0.20/32      # tls-front only
+      ADMIN_USERS: ${TETHER_ADMIN_USERS:?}
+      SINGLE_ADMIN_APPROVAL: ${SINGLE_ADMIN_APPROVAL:-0}
+      CREDENTIAL_BROKER_TOKEN: ${CREDENTIAL_BROKER_TOKEN:?}
+      POLICY_PUBLISHER_TOKEN: ${POLICY_PUBLISHER_TOKEN:?}
+      SIEM_TOKEN: ${SIEM_TOKEN:?}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?}
+      LLM_GATEWAY_TOKEN: ${LLM_GATEWAY_TOKEN:?}
+      INTERCEPTOR_TOKEN: ${INTERCEPTOR_TOKEN:?}
+      CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:?}
+      CONTENT_RETENTION_DAYS: ${CONTENT_RETENTION_DAYS:-90}
+      GUARDRAIL_BYPASS_MAX_SECONDS: ${GUARDRAIL_BYPASS_MAX_SECONDS:-14400}
+      POLICY_BUNDLE_PUBLIC_KEY_FILE: /etc/tether/policy-bundle.pub
+      PLATFORM_LLM_GATEWAY_HOST: host.openshell.internal
+      PLATFORM_POLICY_API_HOST: host.openshell.internal
+      PLATFORM_LOCAL_INFERENCE_HOSTS: gpu.tether.internal
+    volumes:
+      - /etc/tether/policy/bundle.pub:/etc/tether/policy-bundle.pub:ro
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+  credential-broker:
+    image: tether/credential-broker:${TETHER_VERSION:?}
+    environment:
+      POLICY_API: http://policy-api:8080
+      CREDENTIAL_BROKER_TOKEN: ${CREDENTIAL_BROKER_TOKEN:?}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      BROKER_DB: /data/broker.db
+      BROKER_ENCRYPTION_KEY: ${BROKER_ENCRYPTION_KEY:?}
+    volumes: [broker_data:/data]
+    ports: ["127.0.0.1:8081:8081"]
+    depends_on: [policy-api]
+    restart: unless-stopped
+  llm-gateway:
+    image: tether/llm-gateway:${TETHER_VERSION:?}
+    networks:
+      default: {ipv4_address: 172.30.0.10}
+    extra_hosts: ["gpu-01.gpu.tether.internal:host-gateway"]
+    environment:
+      POLICY_API: http://policy-api:8080
+      LLM_GATEWAY_TOKEN: ${LLM_GATEWAY_TOKEN:?}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_GATEWAY_ALLOW_ANY_SOURCE: "1"
+      # Self-hosted model on this host (LOCAL_INFERENCE_PORT in tether.conf), through inference-proxy (mTLS).
+      LOCAL_UPSTREAM: ${LOCAL_UPSTREAM:-}
+      LOCAL_CLIENT_CERT: /etc/tether/tls/llm-gateway-client.crt
+      LOCAL_CLIENT_KEY: /etc/tether/tls/llm-gateway-client.key
+      LOCAL_CA_BUNDLE: /etc/tether/tls/service-ca.pem
+      LOCAL_ALLOW_PLAINTEXT: ""
+    volumes:
+      - /etc/tether/tls/llm-gateway-client.crt:/etc/tether/tls/llm-gateway-client.crt:ro
+      - /etc/tether/tls/llm-gateway-client.key:/etc/tether/tls/llm-gateway-client.key:ro
+      - /etc/tether/tls/service-ca.pem:/etc/tether/tls/service-ca.pem:ro
+    ports: ["127.0.0.1:8082:8082"]
+    depends_on: [policy-api]
+    restart: unless-stopped
+  sandbox-orchestrator:
+    image: tether/sandbox-orchestrator:${TETHER_VERSION:?}
+    # Host network: the OpenShell gateway listens on host loopback (127.0.0.1:17670). The API binds the compose
+    # network's gateway address, reachable from tls-front but not from the LAN. The OpenShell CLI and the
+    # gateway client identity of user "tether" are mounted read-only.
+    network_mode: host
+    command: ["uvicorn", "orchestrator.main:app", "--host", "172.30.0.1", "--port", "8083"]
+    volumes:
+      - /usr/bin/openshell:/usr/local/bin/openshell:ro
+      - /var/lib/tether/.config/openshell/active_gateway:/root/.config/openshell/active_gateway:ro
+      - /var/lib/tether/.config/openshell/gateways/openshell:/root/.config/openshell/gateways/openshell:ro
+    environment:
+      HOME: /root
+      POLICY_API: http://127.0.0.1:8080
+      CREDENTIAL_BROKER: http://127.0.0.1:8081
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?}
+      GITHUB_ORG: ${GITHUB_ORG:?}
+      LLM_GATEWAY_URL: https://host.openshell.internal
+      POLICY_API_PUBLIC_URL: https://host.openshell.internal
+      DEVICE_ID_HEADER: x-tether-client-serial   # set by tls-front from the verified certificate
+      JOB_SCHEDULER: ${JOB_SCHEDULER:-1}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:?}
+      LOCAL_AGENT_IMAGE: ${LOCAL_AGENT_IMAGE:?}
+    depends_on: [policy-api, credential-broker]
+    restart: unless-stopped
+  gateway-interceptor:
+    image: tether/gateway-interceptor:${TETHER_VERSION:?}
+    user: "${TETHER_UID:?}:${TETHER_GID:?}"
+    environment:
+      POLICY_API: http://policy-api:8080
+      INTERCEPTOR_TOKEN: ${INTERCEPTOR_TOKEN:?}
+      PROFILES_DIR: /profiles
+      INTERCEPTOR_ALLOW_UNAUTHENTICATED: "0"
+      INTERCEPTOR_LISTEN: unix:///run/tether/gateway-interceptor.sock
+      GATEWAY_ID: openshell
+      GATEWAY_EXTENSION_PUBLIC_KEY_FILE: /jwt/public.pem
+      ALLOWED_SANDBOX_IMAGES: ${ALLOWED_SANDBOX_IMAGES:?}
+    volumes:
+      - ./profiles:/profiles:ro
+      - /run/tether:/run/tether
+      - /var/lib/tether/.local/state/openshell/tls/jwt/public.pem:/jwt/public.pem:ro
+    depends_on: [policy-api]
+    restart: unless-stopped
+  tls-front:
+    image: ${ENVOY_IMAGE:?}
+    user: "${TETHER_UID:?}:${TETHER_GID:?}"
+    command: ["envoy", "-c", "/etc/envoy/front.yaml", "--log-level", "warn"]
+    networks:
+      default: {ipv4_address: 172.30.0.20}     # the Policy API trusts identity headers only from here
+    volumes:
+      - ./envoy-front.yaml:/etc/envoy/front.yaml:ro
+      - /etc/tether/tls/front.crt:/etc/tether/tls/front.crt:ro
+      - /etc/tether/tls/front.key:/etc/tether/tls/front.key:ro
+      - /etc/tether/tls/user-ca.pem:/etc/tether/tls/user-ca.pem:ro
+      - /etc/tether/tls/user-ca.crl:/etc/tether/tls/user-ca.crl:ro
+    ports: ["127.0.0.1:443:8443", "${TETHER_ADDRESS:?}:443:9443"]
+    depends_on: [policy-api, llm-gateway, sandbox-orchestrator]
+    restart: unless-stopped
+  inference-proxy:
+    profiles: [local-inference]
+    image: ${ENVOY_IMAGE:?}
+    user: "${TETHER_UID:?}:${TETHER_GID:?}"
+    # Host network: the engine listens on host loopback. Accepts only llm-gateway's source address and
+    # client certificate.
+    network_mode: host
+    command: ["envoy", "-c", "/etc/envoy/inference.yaml", "--log-level", "warn"]
+    volumes:
+      - /etc/tether/envoy-inference.yaml:/etc/envoy/inference.yaml:ro
+      - /etc/tether/tls/inference.crt:/etc/tether/tls/inference.crt:ro
+      - /etc/tether/tls/inference.key:/etc/tether/tls/inference.key:ro
+      - /etc/tether/tls/service-ca.pem:/etc/tether/tls/service-ca.pem:ro
+    restart: unless-stopped

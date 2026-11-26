@@ -1,0 +1,32 @@
+# OpenShell gateway as a system service for Tether (docs/install-design.md, step 7), installed by tether-install.
+# The same steps as the package's user unit (/usr/lib/systemd/user/openshell-gateway.service), run as the
+# dedicated account "tether" instead of a person's login with linger. Its home /var/lib/tether holds the
+# gateway config (.config/openshell) and state (.local/state/openshell: TLS, JWT signing bundle, tokens).
+[Unit]
+Description=OpenShell gateway (Tether)
+Documentation=https://github.com/NVIDIA/OpenShell
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tether
+Group=tether
+SupplementaryGroups=docker
+Environment=HOME=/var/lib/tether
+Environment=XDG_CONFIG_HOME=/var/lib/tether/.config
+Environment=XDG_STATE_HOME=/var/lib/tether/.local/state
+Environment=OPENSHELL_LOCAL_TLS_DIR=/var/lib/tether/.local/state/openshell/tls
+EnvironmentFile=-/var/lib/tether/.config/openshell/gateway.env
+StateDirectory=openshell/gateway
+ExecStartPre=/usr/bin/openshell-gateway config preflight
+ExecStartPre=/usr/bin/openshell-gateway generate-certs --output-dir ${OPENSHELL_LOCAL_TLS_DIR} --server-san host.openshell.internal
+ExecStart=/usr/bin/openshell-gateway
+Restart=on-failure
+RestartSec=5s
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

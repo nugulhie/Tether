@@ -61,6 +61,7 @@ PM, 아키텍트, 개발자, QA 관점 검토에서 세 가지가 출시를 막�
 ### 단계 A — 외부 고객 한 곳에 설치할 수 있게 (출시를 막는 것)
 1. **설치 프로그램과 설치 묶음**: 사전 점검, 설정, 기동, 자기 점검. 깨끗한 VM에서 엔지니어 없이 하루 안에 끝나는 것이 완료 기준.
    - 2026-11-26 설계 확정: [설치 프로그램 설계](../install-design.md). 서비스 CA는 서버에서 생성하고 정책 서명 키만 분리, Ubuntu 24.04만, 서명된 오프라인 묶음.
+   - 2026-11-26 첫 구현(`infra/installer/`, 설계 8절): 묶음 생성·서명, `tether-install` 10단계, `tether-doctor`, `tether-admin`. 깨끗한 Ubuntu 24.04 VM(`infra/testvm/install-test.sh`)에서 처음부터 설치 7분(설치 프로그램 42초), doctor 실패 0, e2e 32개 통과·실패 0(자체 모델 항목은 VM에 GPU가 없어 건너뜀). 남은 것: OIDC(A-4), 업그레이드(A-2), 설치 안내서, 인터넷 없는 설치 확인.
 2. **업그레이드와 백업·복구**: 자동 백업, 마이그레이션, 복구 연습 절차.
 3. **키 공급자와 키 교체**: 키 ID 저장, MultiFernet 방식 교체, 백업과 키 분리.
    - 2026-11-26: 키 묶음(`CONTENT_ENCRYPTION_KEYS`, 파일 `CONTENT_ENCRYPTION_KEYS_FILE`), 행마다 키 id(마이그레이션 0012), `python -m app.rekey`와 관리자 API. Vault·KMS 직접 연동과 백업에서 키 분리는 남음.

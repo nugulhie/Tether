@@ -19,6 +19,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sys
 import tempfile
@@ -32,7 +33,9 @@ sys.path.insert(0, str(ROOT / "services/sandbox-orchestrator"))
 from orchestrator.openshell import OpenShell, OpenShellError  # noqa: E402
 from orchestrator.agents import agent_command  # noqa: E402
 
-ENV = dict(line.split("=", 1) for line in (ROOT / "infra/.env").read_text().splitlines() if "=" in line and not line.startswith("#"))
+# The reference server keeps its settings in infra/.env; an installed server (infra/installer) in /etc/tether/compose.env.
+ENV_FILE = Path(os.environ.get("TETHER_E2E_ENV", ROOT / "infra/.env"))
+ENV = dict(line.split("=", 1) for line in ENV_FILE.read_text().splitlines() if "=" in line and not line.startswith("#"))
 POLICY_API = "http://127.0.0.1:8080"
 ORCHESTRATOR = "http://172.30.0.1:8083"   # compose.staging.yml: the orchestrator listens on the compose network's gateway address
 E2E_REPO = ENV.get("E2E_REPO", "https://github.com/nugulhie/Tether")   # public, in GITHUB_ORG
@@ -41,6 +44,8 @@ IMAGE = ENV.get("LOCAL_AGENT_IMAGE") or ENV["SANDBOX_IMAGE"]
 AGENTS_IMAGE = ENV["SANDBOX_IMAGE"]
 PLATFORM = "host.openshell.internal"   # PLATFORM_LLM_GATEWAY_HOST / PLATFORM_POLICY_API_HOST in compose.staging.yml
 MODEL = ENV.get("STAGING_MODEL", "qwen3.5:122b")
+# An install without a self-hosted model (e.g. the installer test VM): the checks that need one are skipped, said so.
+NO_LOCAL_MODEL = os.environ.get("E2E_NO_LOCAL_MODEL") == "1"
 gw = OpenShell()
 failures = []
 FETCH = """import sys, urllib.request
@@ -161,16 +166,10 @@ async def main():
         # Model calls: tether-agent (an agent binary) through the TLS front and LLM gateway to the local model.
         agent_env = {"OPENAI_BASE_URL": f"https://{PLATFORM}/local/v1", "TETHER_MODEL": MODEL, "TETHER_TASK_FILE": "/tmp/task",
                      "TETHER_MAX_STEPS": "3", "TETHER_JOB": "staging-e2e"}
-        await gw.write_file(name, "/tmp/task", b"Do not run any command. Immediately call the finish tool with the summary 'ok'.")
-        rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
-        check("local model answers through the LLM gateway (tether-agent exit 0)", rc == 0, f"rc={rc} {(out + err).strip()[-600:]}")
-        await gw.write_file(name, "/tmp/task", b"Store this deploy key for later: AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
-        rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
-        check("guardrail blocks a secret in the prompt (exit 4)", rc == 4, f"rc={rc} {(out + err).strip()[-600:]}")
-        agent_env["TETHER_MODEL"] = "bge-m3:latest"
-        await gw.write_file(name, "/tmp/task", b"Call finish with the summary 'ok'.")
-        rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
-        check("model outside the policy's llm.local.models refused (exit 4)", rc == 4, f"rc={rc} {(out + err).strip()[-600:]}")
+        if NO_LOCAL_MODEL:
+            print("     (no self-hosted model: local model answer, guardrail and model allow-list checks skipped)")
+        else:
+            await local_model_checks(name, agent_env)
 
         # Widening the policy of a live sandbox must be refused by the interceptor.
         wide = json.loads(json.dumps(s["openshell_policy"]))
@@ -200,6 +199,19 @@ async def main():
             await gw.run("provider", "delete", pname, check=False)
 
 
+async def local_model_checks(name, agent_env):
+    await gw.write_file(name, "/tmp/task", b"Do not run any command. Immediately call the finish tool with the summary 'ok'.")
+    rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
+    check("local model answers through the LLM gateway (tether-agent exit 0)", rc == 0, f"rc={rc} {(out + err).strip()[-600:]}")
+    await gw.write_file(name, "/tmp/task", b"Store this deploy key for later: AKIAIOSFODNN7EXAMPLE / wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
+    check("guardrail blocks a secret in the prompt (exit 4)", rc == 4, f"rc={rc} {(out + err).strip()[-600:]}")
+    agent_env = {**agent_env, "TETHER_MODEL": "bge-m3:latest"}
+    await gw.write_file(name, "/tmp/task", b"Call finish with the summary 'ok'.")
+    rc, out, err = await gw.exec(name, ["/usr/local/bin/tether-agent"], "/workspace", env=agent_env)
+    check("model outside the policy's llm.local.models refused (exit 4)", rc == 4, f"rc={rc} {(out + err).strip()[-600:]}")
+
+
 def job_checks():
     owner, admin = person_token(f"e2e-{secrets.token_hex(3)}"), person_token("e2e-admin", ["tether-admins"])
     status, j = api("POST", "/v1/agent/jobs", owner, {
@@ -224,12 +236,16 @@ def job_checks():
             if r and r["status"] != "running":
                 break
             time.sleep(5)
-        check("job run finished with a stored result", bool(r) and r["status"] == "finished" and r.get("returncode") == 0, r)
-        status, v = api("GET", f"/v1/agent/jobs/{j['id']}/runs/{run['session_id']}", owner)
-        check("owner reads the answer with the changed-file list", status == 200 and "Changed files" in (v.get("output") or ""),
-              (v.get("output") or "")[-300:])
-        check("owner reads the patch with the agent's new file", status == 200 and "b/E2E.txt" in (v.get("diff") or ""),
-              (v.get("diff") or "")[:300])
+        if NO_LOCAL_MODEL:
+            check("job run finished and was recorded", bool(r) and r["status"] == "finished", r)
+            print("     (no self-hosted model: the job's answer and patch are not checked)")
+        else:
+            check("job run finished with a stored result", bool(r) and r["status"] == "finished" and r.get("returncode") == 0, r)
+            status, v = api("GET", f"/v1/agent/jobs/{j['id']}/runs/{run['session_id']}", owner)
+            check("owner reads the answer with the changed-file list", status == 200 and "Changed files" in (v.get("output") or ""),
+                  (v.get("output") or "")[-300:])
+            check("owner reads the patch with the agent's new file", status == 200 and "b/E2E.txt" in (v.get("diff") or ""),
+                  (v.get("diff") or "")[:300])
         status, _ = api("GET", f"/v1/agent/jobs/{j['id']}/runs/{run['session_id']}", person_token("e2e-someone-else"))
         check("another person cannot see the job's result (404)", status == 404)
     finally:

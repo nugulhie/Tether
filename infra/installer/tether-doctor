@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Self-check of an installed Tether server (docs/install-design.md, section 4). Run as root, any time:
+
+    tether-doctor            human-readable; exit status = number of failed checks
+    tether-doctor --json     the same as JSON
+
+Read-only: it changes nothing. Stdlib only.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+ETC = Path("/etc/tether")
+OPT = Path("/opt/tether/current")
+TETHER_HOME = Path("/var/lib/tether")
+results = []
+
+
+def add(area, name, status, detail=""):
+    results.append({"area": area, "check": name, "status": status, "detail": detail})
+
+
+def run(*cmd, input=None, timeout=60):
+    try:
+        p = subprocess.run(cmd, input=input, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, "", str(e)
+
+
+def env_file(path):
+    out = {}
+    try:
+        for line in path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def conf_file(path):
+    out = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def psql(sql):
+    rc, out, err = run("docker", "exec", "tether-postgres-1", "psql", "-U", "agent", "-d", "tether", "-Atc", sql)
+    return out if rc == 0 else None
+
+
+def http_ok(url):
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def days_left(cmd):
+    rc, out, _ = run(*cmd)
+    if rc != 0 or "=" not in out:
+        return None
+    when = datetime.strptime(out.split("=", 1)[1].strip().replace("  ", " "), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+    return (when - datetime.now(timezone.utc)).days
+
+
+def main():
+    manifest = json.loads((OPT / "MANIFEST.json").read_text()) if (OPT / "MANIFEST.json").exists() else None
+    env = env_file(ETC / "compose.env")
+    conf = conf_file(ETC / "tether.conf")
+    if not manifest or not env:
+        add("install", "installed bundle", "fail", f"no {OPT}/MANIFEST.json or {ETC}/compose.env: run tether-install")
+        return
+    add("install", "installed bundle", "ok", f"Tether {manifest['version']} ({manifest['commit']})")
+    local = bool(env.get("LOCAL_UPSTREAM"))
+
+    # Images
+    wrong = []
+    for ref, img in manifest["images"].items():
+        rc, out, _ = run("docker", "image", "inspect", "--format", "{{.Id}}", ref)
+        if out != img["id"]:
+            wrong.append(ref)
+    add("images", "images match MANIFEST.json", "fail" if wrong else "ok", ", ".join(wrong))
+    for key in ("SANDBOX_IMAGE", "LOCAL_AGENT_IMAGE"):
+        name, _, digest = env[key].partition("@")
+        repo = name.split("/", 1)[1].rsplit(":", 1)[0]
+        req = urllib.request.Request(f"http://127.0.0.1:5000/v2/{repo}/manifests/{digest}", method="HEAD", headers={
+            "Accept": "application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,"
+                      "application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                ok = r.status == 200
+        except Exception:
+            ok = False
+        add("images", f"{key} served by the local registry", "ok" if ok else "fail", env[key])
+
+    # Services
+    rc, out, _ = run("docker", "compose", "-p", "tether", "--env-file", str(ETC / "compose.env"), "-f", str(OPT / "compose.yml"),
+                     *(["--profile", "local-inference"] if local else []), "ps", "--format", "json")
+    states = {}
+    for line in out.splitlines():
+        try:
+            c = json.loads(line)
+            states[c["Service"]] = c["State"]
+        except (ValueError, KeyError):
+            pass
+    expected = ["postgres", "policy-api", "credential-broker", "llm-gateway", "sandbox-orchestrator", "gateway-interceptor",
+                "tls-front"] + (["inference-proxy"] if local else [])
+    down = [s for s in expected if states.get(s) != "running"]
+    add("services", "containers running", "fail" if down else "ok", ", ".join(f"{s}: {states.get(s, 'missing')}" for s in down))
+    for name, url in (("Policy API", "http://127.0.0.1:8080/health"), ("credential broker", "http://127.0.0.1:8081/health"),
+                      ("LLM gateway", "http://127.0.0.1:8082/health"), ("orchestrator", "http://172.30.0.1:8083/health")):
+        add("services", f"{name} healthy", "ok" if http_ok(url) else "fail", url)
+    rc, _, _ = run("systemctl", "is-active", "-q", "tether-openshell-gateway")
+    add("services", "OpenShell gateway service active", "ok" if rc == 0 else "fail", "systemctl status tether-openshell-gateway")
+    add("services", "interceptor socket", "ok" if Path("/run/tether/gateway-interceptor.sock").is_socket() else "fail",
+        "/run/tether/gateway-interceptor.sock")
+    rc, out, err = run("runuser", "-u", "tether", "--", "env", f"HOME={TETHER_HOME}", f"XDG_CONFIG_HOME={TETHER_HOME}/.config",
+                       f"XDG_STATE_HOME={TETHER_HOME}/.local/state", "openshell", "status")
+    add("services", "OpenShell gateway answers", "ok" if rc == 0 else "fail", (out or err).splitlines()[0] if (out or err) else "")
+    reg = [TETHER_HOME / ".config/openshell/active_gateway", TETHER_HOME / ".config/openshell/gateways/openshell/metadata.json"]
+    bad = [str(p) for p in reg if not p.is_file()]
+    add("services", "orchestrator's gateway registration", "fail" if bad else "ok", ("not a file: " + ", ".join(bad)) if bad else "")
+    toml = TETHER_HOME / ".config/openshell/gateway.toml"
+    text = toml.read_text() if toml.exists() else ""
+    ok = 'failure_policy     = "fail_closed"' in text and 'binding_policy     = "exact"' in text
+    add("services", "gateway uses the interceptor (fail closed, exact bindings)", "ok" if ok else "fail", str(toml))
+    if local:
+        add("services", "local inference engine answers", "ok" if http_ok(f"http://127.0.0.1:{conf.get('LOCAL_INFERENCE_PORT', '')}/v1/models") else "fail")
+
+    # Database and audit
+    head = psql("select version_num from alembic_version")
+    add("database", "migrations at the bundle's head", "ok" if head == manifest["alembic_head"] else "fail",
+        f"database {head}, bundle {manifest['alembic_head']}")
+    active = psql("select count(*) from policies where active")
+    add("database", "an active policy", "ok" if active and int(active) > 0 else "fail", f"{active} active")
+    rc, out, err = run("docker", "exec", "tether-policy-api-1", "python", "-m", "app.audit_chain", timeout=300)
+    try:
+        chain = json.loads(out.splitlines()[-1])
+        add("database", "audit hash chain verifies", "ok" if chain.get("ok") else "fail",
+            f"{chain.get('events')} events" + ("" if chain.get("ok") else f": {chain}"))
+    except (ValueError, IndexError):
+        add("database", "audit hash chain verifies", "fail", err[-300:])
+
+    # Keys
+    rc, out, err = run("docker", "exec", "tether-policy-api-1", "python", "-m", "app.rekey", "--dry-run", timeout=300)
+    try:
+        k = json.loads(out.splitlines()[-1])
+        if k.get("missing_keys"):
+            add("keys", "content keyring opens every stored row", "fail", f"missing keys: {k['missing_keys']}")
+        else:
+            add("keys", "content keyring opens every stored row", "ok" if not k.get("candidates") else "warn",
+                f"active key {k.get('active')}" + (f"; {k['candidates']} rows on older keys (python -m app.rekey)" if k.get("candidates") else ""))
+    except (ValueError, IndexError):
+        add("keys", "content keyring opens every stored row", "fail", (err or out)[-300:])
+    pub = ETC / "policy/bundle.pub"
+    add("keys", "policy signing public key", "ok" if pub.exists() else "fail", str(pub))
+    if pub.exists():
+        want = run("openssl", "pkey", "-pubin", "-in", str(pub))[1]
+        found = []
+        for root in ("/etc/tether", "/var/lib/tether", "/opt/tether", "/root", "/run", "/tmp", "/home"):
+            for d, _, names in os.walk(root):
+                for n in names:
+                    p = os.path.join(d, n)
+                    if os.path.islink(p) or not os.path.isfile(p):   # never open sockets or FIFOs
+                        continue
+                    try:
+                        if os.path.getsize(p) > 4096 or b"PRIVATE KEY" not in open(p, "rb").read():
+                            continue
+                    except OSError:
+                        continue
+                    if run("openssl", "pkey", "-in", p, "-pubout")[1] == want:
+                        found.append(p)
+        add("keys", "policy signing private key is not on this server", "fail" if found else "ok", ", ".join(found))
+
+    # Certificates
+    for n in ("front", "inference", "llm-gateway-client", "service-ca", "user-ca"):
+        f = ETC / "tls" / (f"{n}.crt" if not n.endswith("-ca") else f"{n}.pem")
+        d = days_left(["openssl", "x509", "-in", str(f), "-noout", "-enddate"])
+        add("certificates", f"{n} valid", "fail" if d is None or d < 0 else "warn" if d < 30 else "ok",
+            "unreadable" if d is None else f"{d} days left" + (" (re-run tether-install to renew)" if d < 30 else ""))
+    d = days_left(["openssl", "crl", "-in", str(ETC / "tls/user-ca.crl"), "-noout", "-nextupdate"])
+    add("certificates", "user CRL current", "fail" if d is None or d < 0 else "warn" if d < 30 else "ok",
+        "unreadable" if d is None else f"next update in {d} days")
+
+    # Providers
+    for p, key in (("Anthropic", "ANTHROPIC_API_KEY"), ("OpenAI", "OPENAI_API_KEY")):
+        add("providers", f"{p} key configured", "ok" if env.get(key) else "warn",
+            "" if env.get(key) else f"{p} models answer 503 'not configured on this gateway'")
+    add("providers", "local inference", "ok" if local else "warn", "configured" if local else "none (LOCAL_INFERENCE_PORT empty)")
+
+    # Security settings
+    rc, out, _ = run("nft", "list", "table", "inet", "tether_host")
+    if conf.get("FIREWALL", "on") == "off":
+        add("security", "host firewall", "warn", "FIREWALL=off")
+    else:
+        add("security", "host firewall loaded", "ok" if rc == 0 else "fail", "systemctl status tether-firewall")
+        rc, out, _ = run("systemctl", "is-active", "-q", "tether-firewall-rollback.timer")
+        if rc == 0:
+            add("security", "host firewall confirmed", "warn", "rollback pending: from a new ssh session run tether-install confirm-firewall")
+    rc, out, _ = run("docker", "inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", "tether-policy-api-1")
+    penv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    add("security", "sign-in mode", "ok" if penv.get("AUTH_MODE") == "mtls" else "fail", f"AUTH_MODE={penv.get('AUTH_MODE')}")
+    if penv.get("SINGLE_ADMIN_APPROVAL") == "1":
+        add("security", "separate approver", "warn", "SINGLE_ADMIN_APPROVAL=1: an administrator may approve their own jobs")
+    rc, out, _ = run("ss", "-ltnH")
+    listeners = [line.split()[3] for line in out.splitlines() if len(line.split()) > 3]
+    exposed = [a for a in listeners if a.rsplit(":", 1)[0] in ("0.0.0.0", "[::]", "*") and a.rsplit(":", 1)[1] in ("11434", "8000", "5432", "8080", "8081", "8082", "17670")]
+    add("security", "no engine, database or service port open to the network", "fail" if exposed else "ok", ", ".join(exposed))
+    modes = {p: oct(p.stat().st_mode & 0o777) for p in (ETC / "compose.env", ETC / "secrets/secrets.env", ETC / "secrets", ETC / "pki") if p.exists()}
+    loose = {str(p): m for p, m in modes.items() if int(m, 8) & 0o077}
+    add("security", "secrets readable by root only", "fail" if loose else "ok", str(loose) if loose else "")
+    export = conf.get("POLICY_SIGNING_KEY_EXPORT")
+    if export and os.path.exists(export):
+        add("keys", "exported policy key media removed", "warn",
+            f"{export} is still attached: unmount and remove the media (keep it offline)")
+
+    # Backup
+    backups = sorted((TETHER_HOME / "backups").glob("*")) if (TETHER_HOME / "backups").exists() else []
+    if backups:
+        age = (time.time() - backups[-1].stat().st_mtime) / 86400
+        add("backup", "recent backup", "ok" if age < 2 else "warn", f"{backups[-1].name}, {age:.1f} days old")
+    else:
+        add("backup", "recent backup", "warn", "no backup yet (scheduled backups: roadmap A-2)")
+
+
+main()
+if "--json" in sys.argv:
+    print(json.dumps({"results": results, "failed": sum(r["status"] == "fail" for r in results)}, indent=2))
+else:
+    area = None
+    for r in results:
+        if r["area"] != area:
+            area = r["area"]
+            print(f"== {area}")
+        mark = {"ok": "[ok]  ", "warn": "[warn]", "fail": "[FAIL]"}[r["status"]]
+        print(f"  {mark} {r['check']}" + (f": {r['detail']}" if r["detail"] else ""))
+    failed = sum(r["status"] == "fail" for r in results)
+    print(f"\n{failed} failed, {sum(r['status'] == 'warn' for r in results)} warnings")
+sys.exit(sum(r["status"] == "fail" for r in results))

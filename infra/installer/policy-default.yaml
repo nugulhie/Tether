@@ -1,0 +1,34 @@
+# First policy of a new install, signed by tether-install with the new policy signing key (step 6) and
+# published once. Afterwards policies change only by signing a new bundle on the administrator's machine.
+# tether-install replaces @GITHUB_ORG@ and drops lines marked "# local-only" when there is no local engine.
+policy_id: default
+version: 1
+priority: 10
+description: Default policy for a new Tether install.
+match:
+  repos: ["*"]
+  environments: [development, staging]
+filesystem:
+  read_only: [/usr, /lib, /proc, /dev/urandom, /etc, /var/log]
+  read_write: [/tmp, /dev/null]
+network:
+  allow: [github.com, api.github.com, pypi.org, registry.npmjs.org]
+network_binaries: [/usr/bin/git, /usr/local/bin/python3.13, /usr/local/bin/node]
+process:
+  allow: [git, python, pytest, npm]
+  deny: [sudo, docker, kubectl]
+aws:
+  role: null
+  duration_seconds: 3600
+github:
+  org: "@GITHUB_ORG@"
+llm:
+  local: {models: ["*"]}   # local-only
+  anthropic: {models: ["claude-*"]}
+  openai: {models: ["gpt-*"]}
+  max_requests_per_minute: 120
+agent_binaries: [/usr/local/libexec/tether/claude, /usr/local/libexec/tether/codex, /usr/local/bin/node, /usr/local/bin/tether-agent]
+guardrails:
+  input: {secrets: true, pii: true, deny_patterns: []}
+  output: {secrets: true, pii: false}
+  on_error: deny

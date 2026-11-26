@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Day-to-day administration of an installed Tether server (run as root):
+#   tether-admin user <name> [days]          certificate folder for a person -> /etc/tether/pki/ca/users/<name>/
+#                                            (hand the folder over privately; they run: tether setup <folder>)
+#   tether-admin revoke <name>               revoke a person's certificate and reload the CRL
+#   tether-admin policy publish <dir> <key>  sign a policy directory with the policy signing key (USB stick) and
+#                                            publish it. The key is read in a container with no network, never copied.
+#   tether-admin compose <args...>           docker compose for the installed control plane (ps, logs, ...)
+set -euo pipefail
+[ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+OPT=/opt/tether/current ETC=/etc/tether
+pki() { TETHER_PKI=$ETC/pki/ca bash "$OPT/tether-pki.sh" "$@"; }
+setting() { grep "^$1=" "$ETC/compose.env" | cut -d= -f2-; }
+compose() { docker compose -p tether --env-file "$ETC/compose.env" -f "$OPT/compose.yml" "$@"; }
+reload_crl() {
+  pki crl > "$ETC/tls/user-ca.crl.new" && chmod 644 "$ETC/tls/user-ca.crl.new" && mv "$ETC/tls/user-ca.crl.new" "$ETC/tls/user-ca.crl"
+  docker restart tether-tls-front-1 >/dev/null && echo "CRL reloaded (tls-front restarted)"
+}
+
+case ${1:-} in
+  user)
+    TETHER_SERVER=https://$(setting TETHER_ADDRESS) pki user "${2:?name}" "${3:-90}" ;;
+  revoke)
+    pki revoke "${2:?name}"
+    reload_crl
+    echo "also end their running sessions: POST /v1/admin/revoke {\"user_id\": \"$2\", \"reason\": \"...\"}" ;;
+  policy)
+    [ "${2:-}" = publish ] || { sed -n 2,9p "$0"; exit 2; }
+    dir=$(cd "${3:?policy directory}" && pwd); key=$(realpath "${4:?policy signing key file}")
+    version=$(setting TETHER_VERSION)
+    last=$(docker exec tether-postgres-1 psql -U agent -d tether -Atc 'select coalesce(max(serial), 0) from policy_bundles')
+    work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+    chmod 755 "$work"
+    tool() { docker run --rm --network none -v "$dir:/p:ro" -v "$key:/k.pem:ro" -v "$work:/w" "tether/policy-api:$version" \
+               python -m policy_compiler.bundle "$@"; }
+    tool validate /p
+    tool bundle /p --serial $((last + 1)) --commit "tether-admin" --key /k.pem --key-id admin --out /w/bundle.json
+    token=$(grep '^POLICY_PUBLISHER_TOKEN=' "$ETC/secrets/secrets.env" | cut -d= -f2-)
+    code=$(curl -sS -o "$work/out" -w '%{http_code}' -X POST http://127.0.0.1:8080/v1/policies/bundle \
+      -H "Authorization: Bearer $token" -H 'content-type: application/json' --data-binary "@$work/bundle.json")
+    cat "$work/out"; echo
+    [ "$code" = 200 ] && echo "published serial $((last + 1)); remove the key's media now" || { echo "refused ($code)" >&2; exit 1; } ;;
+  compose)
+    shift; compose "$@" ;;
+  *)
+    sed -n 2,9p "$0"; exit 2 ;;
+esac

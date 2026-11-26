@@ -21,12 +21,23 @@ python3 infra/staging/50-e2e.py      # "0 failed"여야 함
 ```
 확인하는 것: 승인되지 않은 이미지 거부, 샌드박스 권한·파일·네트워크 제한, 정책 확대 거부, 긴급 차단, 로컬 모델 작업 실행과 결과, Claude Code·Codex의 게이트웨이 경유(회사 키가 있으면 실제 응답까지).
 
-## 3. 버전과 기록
+## 3. 깨끗한 VM 설치 (사람, 출고 전 한 번)
+출고할 묶음을 만들고 서명한 뒤, 고객과 같은 순서로 처음부터 설치하고 e2e까지 돌립니다([설치 프로그램 설계](install-design.md) 7·8절).
+```bash
+# 빌드 서버(지금은 기준 서버)에서
+bash infra/installer/build-bundle.sh X.Y.Z "$(git rev-parse --short HEAD)" ~/tether-dist
+# 릴리스 키가 있는 관리자 Mac에서
+bash infra/installer/sign-bundle.sh soldoc@192.168.1.27 /home/soldoc/tether-dist/tether-X.Y.Z
+# VM이 있는 서버에서: "passed"로 끝나고 종료 코드 0이어야 함
+bash infra/testvm/install-test.sh ~/tether-dist X.Y.Z <릴리스 키 지문>
+```
+
+## 4. 버전과 기록
 - 태그 `vX.Y.Z`. 태그 push에도 `release-gate`가 다시 돕니다.
 - 릴리스 노트: DB 마이그레이션 번호, 설정 변경(새 환경변수), 이미지 digest, 고정한 에이전트 버전(Claude Code, Codex), 알려진 제한.
 - 업그레이드 전 백업은 필수입니다(마이그레이션은 앞으로만 자동, 되돌리기는 백업 복구가 기본).
 
 ## 아직 기준에 없는 것 (로드맵 A-1, A-7)
-- 깨끗한 VM에 설치 프로그램으로 처음부터 설치하는 검사([설치 프로그램 설계](install-design.md) 7절, 설치 프로그램이 생기면 추가)
+- 깨끗한 VM 설치(3절)의 CI 자동화: 지금은 사람이 기준 서버에서 돌린다(KVM이 있는 자체 러너가 필요하다)
 - 이미지 서명과 SBOM, 서비스 이미지의 베이스 digest 고정과 의존성 고정(지금 `services/*/Dockerfile`은 `python:3.13-slim`과 범위 지정 의존성)
 - 이전 버전 DB에서 새 버전으로의 업그레이드 검사(첫 출고 버전이 생기면 그 DB 덤프로)

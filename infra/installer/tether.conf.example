@@ -1,0 +1,38 @@
+# /etc/tether/tether.conf: the only file the customer fills in (docs/install-design.md, section 2).
+# KEY=VALUE, no quotes. No secrets here: secrets are files, named by path (*_FILE).
+# Then: sudo ./install/tether-install /etc/tether/tether.conf
+
+# From the installation guide, not from the bundle: the SHA-256 of our release key (DER). The bundle is refused
+# unless its release-key.pub has exactly this fingerprint.
+RELEASE_KEY_SHA256=
+
+# The address people's machines connect to (this server, on the office network), and optionally its DNS name.
+TETHER_ADDRESS=
+TETHER_HOSTNAME=
+
+# Sign-in. This version supports personal client certificates (mtls); OIDC comes with roadmap item A-4.
+AUTH_MODE=mtls
+# Administrators: certificate names (comma-separated), issued after install with `tether-admin user <name>`.
+TETHER_ADMIN_USERS=
+# 1 only where one person administers alone: they may approve their own jobs (recorded as self_approved).
+SINGLE_ADMIN_APPROVAL=0
+
+# Repositories agents may work on (GitHub organization). A GitHub App (private repositories) comes later.
+GITHUB_ORG=
+
+# Models. A self-hosted OpenAI-compatible engine on this host, bound to 127.0.0.1 (e.g. Ollama 11434);
+# empty = none. External providers: a file holding the company API key; empty = "not configured".
+LOCAL_INFERENCE_PORT=
+ANTHROPIC_API_KEY_FILE=
+OPENAI_API_KEY_FILE=
+
+CONTENT_RETENTION_DAYS=90
+
+# Step 6: where the policy signing private key is written. It must leave this server (USB stick, the
+# administrator's machine): installation does not finish without it, and no copy stays here.
+POLICY_SIGNING_KEY_EXPORT=
+
+# Step 9: host firewall (SSH and 443 from the office network only). on | off
+FIREWALL=on
+# Networks allowed to reach SSH and 443 (comma-separated). Empty = the network of TETHER_ADDRESS.
+ADMIN_NETWORKS=

@@ -43,12 +43,12 @@ sign() {  # ca, csr, eku, san, days
 
 case ${1:-} in
   init)
-    ip=${2:?server IP}
+    ip=${2:?server IP}; dns=${3:-}    # optional: the server's DNS name, when people reach it by name
     mkdir -p -m 700 "$PKI"; chmod 700 "$PKI"
     # host.openshell.internal: how sandboxes reach host services; tether.internal: names that exist only in
-    # container host files (no DNS); the server address for clients on the LAN.
+    # container host files (no DNS); the server address (and name) for clients on the LAN.
     new_ca service-ca "Tether service CA" \
-      -addext "nameConstraints=critical,permitted;DNS:host.openshell.internal,permitted;DNS:tether.internal,permitted;IP:$ip/255.255.255.255,permitted;IP:127.0.0.1/255.255.255.255"
+      -addext "nameConstraints=critical,permitted;DNS:host.openshell.internal,permitted;DNS:tether.internal,permitted;IP:$ip/255.255.255.255,permitted;IP:127.0.0.1/255.255.255.255${dns:+,permitted;DNS:$dns}"
     new_ca user-ca "Tether user CA"
     echo "created $PKI/service-ca.{key,crt} and $PKI/user-ca.{key,crt}; back up $PKI offline" ;;
   sign-server) sign service-ca "${2:?csr}" serverAuth "${3:?san}" "${4:-397}" ;;

@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Install Tether from a signed offline bundle (docs/install-design.md, section 3). Ubuntu 24.04, run as root:
+#   sudo ./install/tether-install /etc/tether/tether.conf     install; re-run any time to repair or renew
+#   sudo ./install/tether-install confirm-firewall             from a NEW ssh session: keep the firewall
+# Every step can be re-run and gives the same result. A failing step stops the install and prints how to
+# undo it. Secrets are generated here and stay in /etc/tether/secrets (root, 600); none is printed.
+set -euo pipefail
+umask 022
+INSTALL_DIR=$(cd "$(dirname "$0")" && pwd)
+BUNDLE=$(dirname "$INSTALL_DIR")
+ETC=/etc/tether SECRETS=/etc/tether/secrets TLS=/etc/tether/tls PKI=/etc/tether/pki/ca
+OPT=/opt/tether TETHER_HOME=/var/lib/tether RUN=/run/tether
+OS_STATE=$TETHER_HOME/.local/state/openshell OS_CONFIG=$TETHER_HOME/.config/openshell
+FW_UNIT=tether-firewall FW_ROLLBACK=tether-firewall-rollback
+step=0
+
+say()  { step=$1; shift; printf '\n== [%s/10] %s\n' "$step" "$*"; }
+info() { printf '   %s\n' "$*"; }
+warn() { printf '   [warn] %s\n' "$*"; }
+die()  { printf '\n[FAIL] step %s: %s\n' "$step" "$1" >&2; [ -z "${2:-}" ] || printf '       to undo: %s\n' "$2" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+
+if [ "${1:-}" = confirm-firewall ]; then
+  systemctl stop "$FW_ROLLBACK.timer" 2>/dev/null && echo "firewall kept (rollback cancelled)" || echo "no pending firewall rollback"
+  exit 0
+fi
+CONF=${1:?usage: tether-install /etc/tether/tether.conf}
+
+# --- configuration: KEY=VALUE lines, parsed (never sourced) ------------------------------------------------
+KEYS="RELEASE_KEY_SHA256 TETHER_ADDRESS TETHER_HOSTNAME AUTH_MODE TETHER_ADMIN_USERS SINGLE_ADMIN_APPROVAL GITHUB_ORG
+      LOCAL_INFERENCE_PORT ANTHROPIC_API_KEY_FILE OPENAI_API_KEY_FILE CONTENT_RETENTION_DAYS POLICY_SIGNING_KEY_EXPORT FIREWALL
+      ADMIN_NETWORKS"
+for k in $KEYS; do printf -v "$k" ''; done
+[ -r "$CONF" ] || { echo "cannot read $CONF (start from install/tether.conf.example)" >&2; exit 1; }
+while IFS= read -r line || [ -n "$line" ]; do
+  line=${line%%#*}; line=${line%"${line##*[![:space:]]}"}
+  [ -n "$line" ] || continue
+  [[ $line =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]] || { echo "$CONF: cannot parse: $line" >&2; exit 1; }
+  k=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]}
+  [[ " $(echo $KEYS) " == *" $k "* ]] || { echo "$CONF: unknown setting $k" >&2; exit 1; }
+  printf -v "$k" '%s' "$v"
+done < "$CONF"
+: "${AUTH_MODE:=mtls}" "${SINGLE_ADMIN_APPROVAL:=0}" "${CONTENT_RETENTION_DAYS:=90}" "${FIREWALL:=on}"
+bad_conf() { echo "$CONF: $*" >&2; exit 1; }
+[ "$AUTH_MODE" = mtls ] || bad_conf "AUTH_MODE=$AUTH_MODE: this version installs mtls only (OIDC: roadmap A-4)"
+[[ $TETHER_ADDRESS =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || bad_conf "TETHER_ADDRESS must be this server's IPv4 address"
+[ -z "$TETHER_HOSTNAME" ] || [[ $TETHER_HOSTNAME =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || bad_conf "TETHER_HOSTNAME is not a DNS name"
+[[ $TETHER_ADMIN_USERS =~ ^[a-z0-9][a-z0-9._,-]*$ ]] || bad_conf "TETHER_ADMIN_USERS: certificate names, comma-separated"
+[[ $GITHUB_ORG =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || bad_conf "GITHUB_ORG must be a GitHub organization name"
+[[ $RELEASE_KEY_SHA256 =~ ^[0-9a-fA-F]{64}$ ]] || bad_conf "RELEASE_KEY_SHA256: the 64-hex fingerprint from the installation guide"
+[ -z "$LOCAL_INFERENCE_PORT" ] || [[ $LOCAL_INFERENCE_PORT =~ ^[0-9]{2,5}$ ]] || bad_conf "LOCAL_INFERENCE_PORT must be a port number"
+[[ $SINGLE_ADMIN_APPROVAL =~ ^[01]$ ]] || bad_conf "SINGLE_ADMIN_APPROVAL is 0 or 1"
+[[ $CONTENT_RETENTION_DAYS =~ ^[0-9]+$ ]] || bad_conf "CONTENT_RETENTION_DAYS must be a number of days"
+[[ $FIREWALL =~ ^(on|off)$ ]] || bad_conf "FIREWALL is on or off"
+[ -z "$ADMIN_NETWORKS" ] || python3 -c 'import ipaddress,sys; [ipaddress.ip_network(n.strip()) for n in sys.argv[1].split(",")]' "$ADMIN_NETWORKS" 2>/dev/null \
+  || bad_conf "ADMIN_NETWORKS: comma-separated IPv4 networks, e.g. 10.0.0.0/24,10.1.0.0/24"
+for f in "$ANTHROPIC_API_KEY_FILE" "$OPENAI_API_KEY_FILE"; do [ -z "$f" ] || [ -r "$f" ] || bad_conf "cannot read $f"; done
+
+manifest() { python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {}, {"m": m}))' "$BUNDLE/MANIFEST.json" "$1"; }
+
+# --- 1. verify ---------------------------------------------------------------------------------------------
+say 1 "Verify the bundle (release key fingerprint, signature, every file)"
+pub=$BUNDLE/release-key.pub
+fp=$(openssl pkey -pubin -in "$pub" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1) || die "no readable release-key.pub"
+[ "$fp" = "${RELEASE_KEY_SHA256,,}" ] || die "release key fingerprint $fp is not RELEASE_KEY_SHA256: do not install this bundle"
+openssl pkeyutl -verify -pubin -inkey "$pub" -rawin -in "$BUNDLE/MANIFEST.json" -sigfile "$BUNDLE/MANIFEST.json.sig" >/dev/null 2>&1 \
+  || die "MANIFEST.json signature does not verify: do not install this bundle"
+python3 - "$BUNDLE" <<'PY' || die "bundle files do not match MANIFEST.json"
+import hashlib, json, os, sys
+root = sys.argv[1]
+m = json.load(open(os.path.join(root, "MANIFEST.json")))
+listed = m["files"]
+present = set()
+for d, _, names in os.walk(root):
+    for n in names:
+        rel = os.path.relpath(os.path.join(d, n), root)
+        if rel not in ("MANIFEST.json", "MANIFEST.json.sig", "release-key.pub"):
+            present.add(rel)
+bad = sorted(set(listed) ^ present)
+for rel in sorted(set(listed) & present):
+    h = hashlib.sha256()
+    with open(os.path.join(root, rel), "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != listed[rel]:
+        bad.append(rel)
+for b in bad:
+    print("   mismatch, missing or unlisted:", b)
+sys.exit(1 if bad else 0)
+PY
+VERSION=$(manifest 'm["version"]')
+info "Tether $VERSION (commit $(manifest 'm["commit"]')), signed by release key $fp"
+
+# --- 2. preflight ------------------------------------------------------------------------------------------
+say 2 "Preflight"
+fails=0
+pf_ok()   { info "[ok]   $*"; }
+pf_bad()  { info "[FAIL] $*"; fails=$((fails + 1)); }
+os=$(. /etc/os-release && echo "$ID $VERSION_ID|$PRETTY_NAME")   # a subshell: os-release defines VERSION too
+[ "${os%%|*}" = "ubuntu 24.04" ] && pf_ok "${os#*|}" || pf_bad "Ubuntu 24.04 required, found ${os#*|}"
+[ "$(uname -m)" = x86_64 ] && pf_ok "x86_64" || pf_bad "x86_64 required"
+[ -f /sys/fs/cgroup/cgroup.controllers ] && pf_ok "cgroup v2" || pf_bad "cgroup v2 required"
+grep -qw landlock /sys/kernel/security/lsm 2>/dev/null && pf_ok "Landlock enabled" || pf_bad "the kernel has no Landlock LSM (sandbox filesystem rules need it)"
+cpus=$(nproc); mem=$(awk '/MemTotal/ {print int($2/1048576)}' /proc/meminfo)
+[ "$cpus" -ge 4 ] && pf_ok "$cpus CPUs" || pf_bad "at least 4 CPUs, found $cpus"
+[ "$mem" -ge 7 ] && pf_ok "${mem} GiB memory" || pf_bad "at least 8 GiB memory, found ${mem} GiB"
+if command -v docker >/dev/null && dv=$(docker version --format '{{.Server.Version}}' 2>/dev/null); then
+  [ "${dv%%.*}" -ge 28 ] && pf_ok "Docker $dv" || pf_bad "Docker Engine 28 or later required, found $dv"
+  docker compose version >/dev/null 2>&1 && pf_ok "docker compose $(docker compose version --short)" || pf_bad "the docker compose plugin is missing"
+  free=$(df -BG --output=avail "$(docker info --format '{{.DockerRootDir}}')" | tail -1 | tr -dc 0-9)
+  [ "$free" -ge 30 ] && pf_ok "${free} GiB free for Docker" || pf_bad "at least 30 GiB free under Docker's root, found ${free} GiB"
+else
+  pf_bad "Docker Engine is not installed or not running (a prerequisite: install it from your mirror)"
+fi
+ip -4 -o addr show | awk '{print $4}' | grep -q "^$TETHER_ADDRESS/" && pf_ok "$TETHER_ADDRESS is on this host" \
+  || pf_bad "TETHER_ADDRESS $TETHER_ADDRESS is not an address of this host"
+held=$(ss -ltnpH "( sport = :443 )" 2>/dev/null | grep -v docker-proxy || true)
+[ -z "$held" ] && pf_ok "port 443 free (or ours)" || pf_bad "port 443 is in use: $held"
+[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] && pf_ok "clock synchronized" \
+  || info "[warn] clock not synchronized (certificates and token expiry depend on it)"
+openssl version | grep -qE '^OpenSSL [3-9]' && pf_ok "$(openssl version | cut -d' ' -f1-2)" || pf_bad "OpenSSL 3 required"
+if [ -n "$LOCAL_INFERENCE_PORT" ]; then
+  if ss -ltnH "( sport = :$LOCAL_INFERENCE_PORT )" | awk '{print $4}' | grep -qvE "^(127\.0\.0\.1|\[::1\]):"; then
+    pf_bad "the inference engine on port $LOCAL_INFERENCE_PORT listens beyond 127.0.0.1 (bind it to 127.0.0.1)"
+  elif curl -fsS --max-time 5 "http://127.0.0.1:$LOCAL_INFERENCE_PORT/v1/models" >/dev/null; then
+    pf_ok "inference engine answers on 127.0.0.1:$LOCAL_INFERENCE_PORT"
+  else
+    pf_bad "no OpenAI-compatible engine on 127.0.0.1:$LOCAL_INFERENCE_PORT (/v1/models)"
+  fi
+fi
+[ "$fails" = 0 ] || die "$fails preflight check(s) failed" "nothing was changed"
+
+# --- 3. images ---------------------------------------------------------------------------------------------
+say 3 "Load the images and check them against MANIFEST.json"
+image_id() { docker image inspect --format '{{.Id}}' "$1" 2>/dev/null || true; }
+while IFS='|' read -r ref id file; do
+  if [ "$(image_id "$ref")" != "$id" ]; then
+    docker load -q -i "$BUNDLE/$file" >/dev/null || die "docker load $file failed"
+  fi
+  [ "$(image_id "$ref")" = "$id" ] || die "$ref is $(image_id "$ref") after loading, MANIFEST says $id"
+  info "$ref"
+done < <(python3 -c 'import json,sys; [print(r, i["id"], i["file"], sep="|") for r,i in json.load(open(sys.argv[1]))["images"].items()]' "$BUNDLE/MANIFEST.json")
+REGISTRY_IMAGE=$(manifest 'm["roles"]["registry"]')
+if [ "$(docker inspect -f '{{.State.Running}}' tether-registry 2>/dev/null)" != true ]; then
+  docker rm -f tether-registry >/dev/null 2>&1 || true
+  docker run -d --name tether-registry --restart unless-stopped -p 127.0.0.1:5000:5000 \
+    -v tether_registry:/var/lib/registry "$REGISTRY_IMAGE" >/dev/null || die "cannot start the local registry"
+  for _ in $(seq 30); do curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break; sleep 1; done
+fi
+push() {  # local image ref -> its digest-pinned name in the local registry
+  local ref=$1 name=127.0.0.1:5000/${1%%:*} tag=${1##*:}
+  docker tag "$ref" "$name:$tag"
+  docker push -q "$name:$tag" >/dev/null || die "cannot push $ref to the local registry" "docker rm -f tether-registry"
+  docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$name:$tag" | grep "^$name@sha256:" | head -1
+}
+SANDBOX_IMAGE=$(push "$(manifest 'm["roles"]["coding_agents"]')")
+LOCAL_AGENT_IMAGE=$(push "$(manifest 'm["roles"]["local_agent"]')")
+[ -n "$SANDBOX_IMAGE" ] && [ -n "$LOCAL_AGENT_IMAGE" ] || die "no registry digest for the sandbox images"
+info "sandbox images: $SANDBOX_IMAGE"
+info "                $LOCAL_AGENT_IMAGE"
+
+# --- 4. secrets --------------------------------------------------------------------------------------------
+say 4 "Accounts and secrets (/etc/tether/secrets, root only; existing ones are kept)"
+getent passwd tether >/dev/null || useradd --system --home-dir "$TETHER_HOME" --create-home --shell /usr/sbin/nologin tether
+usermod -aG docker tether
+install -d -m 0755 "$ETC"
+install -d -m 0700 "$SECRETS"
+install -d -m 0750 -o tether -g tether "$TETHER_HOME"
+umask 077
+touch "$SECRETS/secrets.env"
+add_secret() { grep -qs "^$1=" "$SECRETS/secrets.env" || echo "$1=$2" >> "$SECRETS/secrets.env"; }
+token()  { python3 -c 'import secrets; print(secrets.token_urlsafe(32))'; }
+fernet() { python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())'; }
+for t in CREDENTIAL_BROKER_TOKEN POLICY_PUBLISHER_TOKEN SIEM_TOKEN ORCHESTRATOR_TOKEN LLM_GATEWAY_TOKEN INTERCEPTOR_TOKEN USER_TOKEN_KEY POSTGRES_PASSWORD; do
+  add_secret "$t" "$(token)"
+done
+add_secret BROKER_ENCRYPTION_KEY "$(fernet)"
+# Content keyring (app/content_keys.py): the first key encrypts, all decrypt. Rotate: prepend a new id:key, re-run, rekey.
+add_secret CONTENT_ENCRYPTION_KEYS "k$(date -u +%Y%m%d):$(fernet)"
+provider_key() { [ -z "$1" ] || tr -d '\r\n' < "$1"; }
+LOCAL_UPSTREAM=""; [ -z "$LOCAL_INFERENCE_PORT" ] || LOCAL_UPSTREAM=https://gpu-01.gpu.tether.internal:8443
+{
+  echo "# Written by tether-install from $CONF and $SECRETS/secrets.env. Do not edit: re-run tether-install."
+  echo "TETHER_VERSION=$VERSION"
+  echo "POSTGRES_IMAGE=$(manifest 'm["roles"]["postgres"]')"
+  echo "ENVOY_IMAGE=$(manifest 'm["roles"]["envoy"]')"
+  echo "TETHER_ADDRESS=$TETHER_ADDRESS"
+  echo "TETHER_ADMIN_USERS=$TETHER_ADMIN_USERS"
+  echo "SINGLE_ADMIN_APPROVAL=$SINGLE_ADMIN_APPROVAL"
+  echo "GITHUB_ORG=$GITHUB_ORG"
+  echo "CONTENT_RETENTION_DAYS=$CONTENT_RETENTION_DAYS"
+  echo "TETHER_UID=$(id -u tether)"
+  echo "TETHER_GID=$(id -g tether)"
+  echo "LOCAL_UPSTREAM=$LOCAL_UPSTREAM"
+  echo "SANDBOX_IMAGE=$SANDBOX_IMAGE"
+  echo "LOCAL_AGENT_IMAGE=$LOCAL_AGENT_IMAGE"
+  echo "ALLOWED_SANDBOX_IMAGES=$SANDBOX_IMAGE,$LOCAL_AGENT_IMAGE"
+  echo "ANTHROPIC_API_KEY=$(provider_key "$ANTHROPIC_API_KEY_FILE")"
+  echo "OPENAI_API_KEY=$(provider_key "$OPENAI_API_KEY_FILE")"
+  cat "$SECRETS/secrets.env"
+} > "$ETC/compose.env.new"
+mv "$ETC/compose.env.new" "$ETC/compose.env"
+chmod 600 "$ETC/compose.env" "$SECRETS/secrets.env"
+umask 022
+info "secrets in $SECRETS/secrets.env; compose settings in $ETC/compose.env (both mode 600)"
+
+# --- 5. PKI ------------------------------------------------------------------------------------------------
+say 5 "Certificates (service CA and user CA on this server, /etc/tether/pki)"
+pki() { TETHER_PKI=$PKI bash "$INSTALL_DIR/tether-pki.sh" "$@"; }
+install -d -m 0700 "$(dirname "$PKI")"
+[ -e "$PKI/service-ca.key" ] || pki init "$TETHER_ADDRESS" "$TETHER_HOSTNAME" | sed 's/^/   /'
+install -d -m 0750 -o root -g tether "$TLS"
+front_san="DNS:host.openshell.internal,IP:127.0.0.1,IP:$TETHER_ADDRESS${TETHER_HOSTNAME:+,DNS:$TETHER_HOSTNAME}"
+issue() {  # name, server|client, SAN: (re)issue when missing, expiring within 30 days, or for different names
+  local n=$1 kind=$2 san=$3 csr
+  if [ -e "$TLS/$n.crt" ] && openssl x509 -in "$TLS/$n.crt" -noout -checkend 2592000 >/dev/null \
+     && [ "$(cat "$TLS/$n.san" 2>/dev/null)" = "$san" ]; then return; fi
+  [ -e "$TLS/$n.key" ] || (umask 077; openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TLS/$n.key")
+  csr=$(mktemp); openssl req -new -key "$TLS/$n.key" -subj "/O=Tether/CN=$n" -out "$csr"
+  pki "sign-$kind" "$csr" "$san" > "$TLS/$n.crt.new"; rm -f "$csr"
+  mv "$TLS/$n.crt.new" "$TLS/$n.crt"; echo "$san" > "$TLS/$n.san"
+  info "issued $n ($(openssl x509 -in "$TLS/$n.crt" -noout -enddate))"
+}
+issue front server "$front_san"
+issue inference server "DNS:gpu-01.gpu.tether.internal"
+issue llm-gateway-client client "DNS:llm-gateway.tether.internal"
+pki ca > "$TLS/service-ca.pem"
+cp "$PKI/user-ca.crt" "$TLS/user-ca.pem"
+if ! [ -e "$TLS/user-ca.crl" ] || ! openssl crl -in "$TLS/user-ca.crl" -noout -nextupdate >/dev/null 2>&1 \
+   || [ "$(date -d "$(openssl crl -in "$TLS/user-ca.crl" -noout -nextupdate | cut -d= -f2)" +%s)" -lt $(( $(date +%s) + 2592000 )) ]; then
+  pki crl > "$TLS/user-ca.crl"
+fi
+chown tether:tether "$TLS"/*.key; chmod 600 "$TLS"/*.key
+chmod 644 "$TLS"/*.crt "$TLS"/*.pem "$TLS"/*.crl
+for n in front inference llm-gateway-client; do
+  openssl verify -CAfile "$TLS/service-ca.pem" "$TLS/$n.crt" >/dev/null || die "$n.crt does not verify against the service CA" "rm -rf $TLS $PKI"
+done
+info "service CA, user CA and server certificates ready"
+
+# --- 6. policy signing key ---------------------------------------------------------------------------------
+say 6 "Policy signing key (the private key leaves this server)"
+install -d -m 0755 "$ETC/policy"
+if [ -e "$ETC/policy/bundle.pub" ]; then
+  info "already set up: $ETC/policy/bundle.pub (the private key is wherever it was exported to)"
+else
+  [ -n "$POLICY_SIGNING_KEY_EXPORT" ] || die "set POLICY_SIGNING_KEY_EXPORT (e.g. a file on a USB stick) in $CONF"
+  [ -d "$(dirname "$POLICY_SIGNING_KEY_EXPORT")" ] || die "$(dirname "$POLICY_SIGNING_KEY_EXPORT") does not exist (mount the USB stick?)"
+  [ ! -e "$POLICY_SIGNING_KEY_EXPORT" ] || die "$POLICY_SIGNING_KEY_EXPORT already exists; choose a new file name"
+  work=$(mktemp -d -p /run tether-install.XXXXXX)   # tmpfs: the private key never touches this server's disk
+  trap 'shred -u "$work"/*.pem 2>/dev/null || true; rm -rf "$work"' EXIT
+  install -d -m 0755 "$work/policies"
+  sed -e "s/@GITHUB_ORG@/$GITHUB_ORG/" "$INSTALL_DIR/policy-default.yaml" \
+    | { if [ -n "$LOCAL_INFERENCE_PORT" ]; then cat; else grep -v '# local-only'; fi; } > "$work/policies/default.yaml"
+  bundle_tool() { docker run --rm --network none -v "$work:/w" "tether/policy-api:$VERSION" python -m policy_compiler.bundle "$@"; }
+  bundle_tool keygen /w/key.pem /w/key.pub >/dev/null
+  bundle_tool validate /w/policies >/dev/null || die "the default policy does not validate"
+  bundle_tool bundle /w/policies --serial 1 --commit "install-$VERSION" --key /w/key.pem --key-id install --out /w/bundle.json >/dev/null
+  install -m 600 "$work/key.pem" "$POLICY_SIGNING_KEY_EXPORT"
+  cmp -s "$work/key.pem" "$POLICY_SIGNING_KEY_EXPORT" || die "the exported key does not read back"
+  sync
+  install -m 644 "$work/key.pub" "$ETC/policy/bundle.pub"
+  install -m 644 "$work/bundle.json" "$ETC/policy/initial-bundle.json"
+  shred -u "$work/key.pem"
+  info "private key written to $POLICY_SIGNING_KEY_EXPORT and erased here: keep it off this server"
+  if [ "$(stat -c %d "$(dirname "$POLICY_SIGNING_KEY_EXPORT")")" = "$(stat -c %d /)" ]; then
+    warn "$POLICY_SIGNING_KEY_EXPORT is on this server's own disk: move it to removable media now (tether-doctor flags it)"
+  fi
+fi
+
+# --- 7. OpenShell ------------------------------------------------------------------------------------------
+say 7 "OpenShell gateway (system service, user tether)"
+deb=$BUNDLE/$(manifest 'm["roles"]["openshell_deb"]')
+want=$(manifest 'm["components"]["openshell"]')
+have=$(dpkg-query -W -f '${Version}' openshell 2>/dev/null || true)
+[ "${have%%-*}" = "$want" ] || dpkg -i "$deb" >/dev/null || die "cannot install $(basename "$deb")" "apt-get purge -y openshell"
+echo "d $RUN 0750 tether tether -" > /etc/tmpfiles.d/tether.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/tether.conf
+install -d -m 0700 -o tether -g tether "$TETHER_HOME/.config" "$OS_CONFIG" "$TETHER_HOME/.local" "$TETHER_HOME/.local/state"
+printf 'OPENSHELL_TELEMETRY_ENABLED=false\nOPENSHELL_COMPUTE_DRIVER=docker\n' > "$OS_CONFIG/gateway.env"
+chown tether:tether "$OS_CONFIG/gateway.env"; chmod 600 "$OS_CONFIG/gateway.env"
+install -m 644 "$INSTALL_DIR/tether-openshell-gateway.service" /etc/systemd/system/tether-openshell-gateway.service
+systemctl daemon-reload
+as_tether() { runuser -u tether -- env HOME=$TETHER_HOME XDG_CONFIG_HOME=$TETHER_HOME/.config XDG_STATE_HOME=$TETHER_HOME/.local/state "$@"; }
+if ! [ -e "$OS_CONFIG/gateway.toml" ]; then
+  systemctl enable --now tether-openshell-gateway >/dev/null 2>&1 || true
+fi
+for _ in $(seq 30); do [ -r "$OS_STATE/tls/jwt/public.pem" ] && break; sleep 1; done
+[ -r "$OS_STATE/tls/jwt/public.pem" ] || die "the gateway wrote no TLS/JWT material (journalctl -u tether-openshell-gateway)" \
+  "systemctl disable --now tether-openshell-gateway; apt-get purge -y openshell"
+# The orchestrator mounts these two paths; if one was missing when compose started, Docker made a directory there.
+[ ! -d "$OS_CONFIG/active_gateway" ] || rmdir "$OS_CONFIG/active_gateway"
+if ! [ -f "$OS_CONFIG/active_gateway" ] || ! [ -f "$OS_CONFIG/gateways/openshell/metadata.json" ]; then
+  as_tether openshell gateway add https://127.0.0.1:17670 --local --name openshell >/dev/null \
+    || die "cannot register the gateway with the OpenShell CLI"
+fi
+[ -f "$OS_CONFIG/active_gateway" ] && [ -f "$OS_CONFIG/gateways/openshell/metadata.json" ] \
+  || die "the OpenShell CLI registration is incomplete ($OS_CONFIG)"
+info "openshell $want, gateway registered for user tether"
+
+# --- 8. control plane --------------------------------------------------------------------------------------
+say 8 "Control plane (docker compose -p tether)"
+dest=$OPT/$VERSION
+install -d -m 0755 "$OPT" "$dest"
+cp -a "$INSTALL_DIR/." "$dest/"
+cp "$BUNDLE/MANIFEST.json" "$BUNDLE/MANIFEST.json.sig" "$BUNDLE/release-key.pub" "$dest/"
+ln -sfn "$dest" "$OPT/current"
+ln -sfn "$OPT/current/tether-doctor" /usr/local/sbin/tether-doctor
+ln -sfn "$OPT/current/tether-admin" /usr/local/sbin/tether-admin
+if [ -n "$LOCAL_INFERENCE_PORT" ]; then
+  sed "s/port_value: 11434/port_value: $LOCAL_INFERENCE_PORT/" "$dest/envoy-inference.yaml" > "$ETC/envoy-inference.yaml"
+fi
+compose() { docker compose -p tether --env-file "$ETC/compose.env" -f "$OPT/current/compose.yml" ${LOCAL_INFERENCE_PORT:+--profile local-inference} "$@"; }
+psql() { docker exec tether-postgres-1 psql -U agent -d tether -Atc "$1"; }
+compose up -d --wait postgres >/dev/null 2>&1 || die "Postgres did not become healthy (docker logs tether-postgres-1)"
+if [ "$(psql "select count(*) from information_schema.tables where table_name = 'alembic_version'")" = 1 ]; then
+  head=$(psql "select version_num from alembic_version")
+  if [ "$head" != "$(manifest 'm["alembic_head"]')" ]; then
+    install -d -m 0700 "$TETHER_HOME/backups"
+    b=$TETHER_HOME/backups/pre-migrate-$head-$(date -u +%Y%m%dT%H%M%SZ).sql.gz
+    docker exec tether-postgres-1 pg_dump -U agent -d tether | gzip > "$b"; chmod 600 "$b"
+    info "database backed up to $b"
+  fi
+fi
+compose run --rm --no-deps policy-api python -c 'from app.db import migrate; migrate()' 2>&1 | grep -v '^INFO' | sed 's/^/   /' || true
+[ "$(psql "select version_num from alembic_version")" = "$(manifest 'm["alembic_head"]')" ] \
+  || die "database is not at migration $(manifest 'm["alembic_head"]')" "restore the backup in $TETHER_HOME/backups"
+compose up -d --remove-orphans >/dev/null 2>&1 || { compose ps; die "docker compose up failed"; }
+for u in http://127.0.0.1:8080 http://127.0.0.1:8081 http://127.0.0.1:8082 http://172.30.0.1:8083; do
+  for _ in $(seq 60); do curl -fsS "$u/health" >/dev/null 2>&1 && break; sleep 2; done
+  curl -fsS "$u/health" >/dev/null 2>&1 || die "no health from $u (docker compose -p tether logs)"
+done
+if [ "$(psql "select count(*) from policy_bundles")" = 0 ]; then
+  token=$(grep '^POLICY_PUBLISHER_TOKEN=' "$SECRETS/secrets.env" | cut -d= -f2-)
+  code=$(curl -sS -o /tmp/tether-publish.out -w '%{http_code}' -X POST http://127.0.0.1:8080/v1/policies/bundle \
+    -H "Authorization: Bearer $token" -H 'content-type: application/json' --data-binary "@$ETC/policy/initial-bundle.json")
+  [ "$code" = 200 ] || { cat /tmp/tether-publish.out >&2; die "the initial policy bundle was refused ($code)"; }
+  rm -f /tmp/tether-publish.out
+  info "default policy published (serial 1)"
+fi
+for _ in $(seq 30); do [ -S "$RUN/gateway-interceptor.sock" ] && break; sleep 1; done
+[ -S "$RUN/gateway-interceptor.sock" ] || die "the gateway interceptor socket did not appear (docker logs tether-gateway-interceptor-1)"
+# Gateway config: the interceptor (fail closed, exact bindings), the default image, and trust for the service CA.
+toml=$(mktemp)
+sed -e "s|^default_image *=.*|default_image       = \"$SANDBOX_IMAGE\"|" "$OPT/current/gateway.toml" > "$toml"
+printf '\n[openshell.supervisor.network]\nadditional_ca_bundle = "%s"\n' "$TLS/service-ca.pem" >> "$toml"
+grep -q "^default_image *= *\"$SANDBOX_IMAGE\"" "$toml" || die "default_image not set in gateway.toml"
+install -m 600 -o tether -g tether "$toml" "$OS_CONFIG/gateway.toml.new"; rm -f "$toml"
+as_tether openshell-gateway config preflight --path "$OS_CONFIG/gateway.toml.new" >/dev/null || die "gateway.toml preflight failed"
+if ! cmp -s "$OS_CONFIG/gateway.toml.new" "$OS_CONFIG/gateway.toml" 2>/dev/null || ! systemctl is-active -q tether-openshell-gateway; then
+  mv "$OS_CONFIG/gateway.toml.new" "$OS_CONFIG/gateway.toml"
+  systemctl enable tether-openshell-gateway >/dev/null 2>&1
+  systemctl restart tether-openshell-gateway
+else
+  rm -f "$OS_CONFIG/gateway.toml.new"
+fi
+for _ in $(seq 30); do as_tether openshell status >/dev/null 2>&1 && break; sleep 2; done
+as_tether openshell status >/dev/null 2>&1 || die "the gateway is not answering (journalctl -u tether-openshell-gateway)" \
+  "rm $OS_CONFIG/gateway.toml; systemctl restart tether-openshell-gateway"
+info "control plane up; gateway running with the interceptor (fail closed)"
+
+# --- 9. firewall -------------------------------------------------------------------------------------------
+say 9 "Host firewall"
+if [ "$FIREWALL" = off ]; then
+  systemctl disable --now "$FW_UNIT" >/dev/null 2>&1 || true
+  warn "FIREWALL=off: no host firewall (tether-doctor reports it)"
+else
+  iface=$(ip -4 -o addr show | awk -v a="$TETHER_ADDRESS" '$4 ~ "^"a"/" {print $2; exit}')
+  cidr=$(ip -4 -o addr show dev "$iface" | awk -v a="$TETHER_ADDRESS" '$4 ~ "^"a"/" {print $4; exit}')
+  lan=${ADMIN_NETWORKS:-$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)' "$cidr")}
+  lan=$(echo "$lan" | tr -d ' ')
+  engine_uid=""
+  if [ -n "$LOCAL_INFERENCE_PORT" ]; then
+    pid=$(ss -ltnpH "( sport = :$LOCAL_INFERENCE_PORT )" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    engine_uid=$(stat -c %u "/proc/$pid" 2>/dev/null || true)
+    [ -n "$engine_uid" ] && [ "$engine_uid" != 0 ] || die "cannot tell which account runs the inference engine (it must not be root)"
+  fi
+  new=$(mktemp)
+  { echo "# Written by tether-install. LAN: ADMIN_NETWORKS, or the office network of $TETHER_ADDRESS."
+    echo "define LAN = { ${lan//,/, } }"; echo "define LLM_GATEWAY = 172.30.0.10"; echo "define TLS_FRONT = 172.30.0.20"
+    [ -z "$engine_uid" ] || echo "define ENGINE_UID = $engine_uid"
+    if [ -n "$engine_uid" ]; then cat "$OPT/current/firewall.nft"; else grep -v '# local-only' "$OPT/current/firewall.nft"; fi
+  } > "$new"
+  nft -c -f "$new" || die "the firewall rules do not load"
+  client=${SUDO_SSH_CLIENT:-${SSH_CLIENT:-}}; client=${client%% *}
+  [ -n "$client" ] || client=$(who -m 2>/dev/null | sed -n 's/.*(\([0-9.]*\)).*/\1/p')
+  if [ -n "$client" ] && ! python3 -c 'import ipaddress,sys; sys.exit(0 if any(ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(n) for n in sys.argv[2].split(",")) else 1)' "$client" "$lan"; then
+    die "your SSH address $client is outside $lan, so the firewall would lock you out" "set FIREWALL=off or install from the office network"
+  fi
+  cat > /etc/systemd/system/$FW_UNIT.service <<EOF
+[Unit]
+Description=Tether host firewall (/etc/tether/firewall.nft)
+After=docker.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/tether/firewall.nft
+ExecStop=/usr/sbin/nft delete table inet tether_host
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  if cmp -s "$new" "$ETC/firewall.nft" && systemctl is-active -q "$FW_UNIT"; then
+    rm -f "$new"; info "unchanged and active"
+  else
+    install -m 644 "$new" "$ETC/firewall.nft"; rm -f "$new"
+    systemctl stop "$FW_ROLLBACK.timer" "$FW_ROLLBACK.service" >/dev/null 2>&1 || true
+    systemctl reset-failed "$FW_ROLLBACK.timer" "$FW_ROLLBACK.service" >/dev/null 2>&1 || true
+    systemd-run --quiet --unit "$FW_ROLLBACK" --on-active=300 /usr/bin/systemctl disable --now "$FW_UNIT"
+    systemctl enable "$FW_UNIT" >/dev/null 2>&1
+    systemctl restart "$FW_UNIT"
+    info "applied (SSH and 443 from $lan only). It is removed again in 5 minutes unless, from a NEW ssh session, you run:"
+    info "  sudo $OPT/current/tether-install confirm-firewall"
+  fi
+fi
+
+# --- 10. self-check ----------------------------------------------------------------------------------------
+say 10 "Self-check (tether-doctor)"
+if "$OPT/current/tether-doctor"; then
+  printf '\nTether %s is installed.\n' "$VERSION"
+  printf '  Next: sudo tether-admin user <name>   (a certificate folder for each administrator in TETHER_ADMIN_USERS, then each person)\n'
+  exit 0
+fi
+die "tether-doctor reported failures (above); fix them and re-run this installer"
