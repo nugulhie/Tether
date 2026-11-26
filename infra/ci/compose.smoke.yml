@@ -1,0 +1,6 @@
+# Override for the release-gate smoke test (infra/ci/smoke.py): the development stack without host-port
+# clashes. Postgres is reached only by the services, not published (a developer's own Postgres may hold 5432).
+# The gateway interceptor is left out (it needs an OpenShell gateway to be useful): start the services by name.
+services:
+  postgres:
+    ports: !reset []

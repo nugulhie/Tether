@@ -67,6 +67,7 @@ PM, 아키텍트, 개발자, QA 관점 검토에서 세 가지가 출시를 막�
 5. **외부 모델 경로 실사용 검증**: `tether claude`/`tether codex`를 샌드박스 이미지, 게이트웨이, 가드레일까지 끝까지 확인.
    - 2026-11-26: 이미지 `infra/sandbox-images/coding-agents`(Claude Code 2.1.332, Codex 0.172.0, 실행 파일은 `/usr/local/libexec/tether`), 실서버 e2e에서 두 에이전트 모두 샌드박스 → 프록시 → 게이트웨이 도달 확인. 정책 밖 모델은 403. 회사 키를 넣은 뒤 실제 응답 확인이 남음.
 6. **CI 릴리스 게이트**: 단위 테스트, 깨끗한 VM 설치, e2e가 모두 통과해야 출고.
+   - 2026-11-26: `release-gate.yml`(Postgres 스키마 검사, 이미지 빌드, compose smoke)과 [릴리스 기준](../release.md). 첫 실행에서 모델과 마이그레이션의 NOT NULL 불일치 19곳을 찾아 0013으로 맞춤. 깨끗한 VM 설치 검사는 A-1 뒤.
 7. **서명**: macOS 런처 Developer ID 서명·공증, 컨테이너 이미지와 설치 묶음 서명.
 
 ### 단계 B — 고객 보안팀 심사를 통과하게

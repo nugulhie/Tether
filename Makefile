@@ -24,6 +24,11 @@ test: gen
 	cd local-agent && uv run -q --no-project --python 3.13 --with pytest --with httpx pytest -q -p no:warnings tests
 	cd infra/gpu/network && uv run -q --no-project --python 3.13 --with pytest --with pyyaml pytest -q -p no:warnings tests
 	cd infra/gpu/signing && uv run -q --no-project --python 3.13 --with pytest --with cryptography pytest -q -p no:warnings tests
+# Release gate (ADR 0002, A-6): the built images talking to each other in development mode.
+SMOKE = cd infra && docker compose -p tether-smoke -f docker-compose.yml -f ci/compose.smoke.yml
+smoke: dev-env
+	$(SMOKE) up -d --build --wait postgres policy-api credential-broker llm-gateway sandbox-orchestrator
+	python3 infra/ci/smoke.py; rc=$$?; $(SMOKE) logs --no-color > infra/ci/smoke.log 2>&1; $(SMOKE) down -v; exit $$rc
 launcher-pkg:
 	cd agent-launcher && ./packaging/build-macos.sh
 gpu-network:

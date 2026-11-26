@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, LargeBinary, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -97,6 +97,7 @@ class ContentHold(Base):
     # scope is never purged, whatever its age. scope is user | session | job; value is the
     # user id, session id or job id. Holds are released, never deleted.
     __tablename__ = "content_holds"
+    __table_args__ = (Index("ix_content_holds_open", "released_at"),)  # migration 0009
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     scope: Mapped[str] = mapped_column(String(16))
     value: Mapped[str] = mapped_column(String(256))
@@ -111,6 +112,7 @@ class GuardrailBypass(Base):
     # Break-glass (ADR 0001, D4): an administrator lifts guardrails for a scope until expires_at.
     # Session checks, model allow-lists, network policy and content audit stay in force.
     __tablename__ = "guardrail_bypasses"
+    __table_args__ = (Index("ix_guardrail_bypasses_open", "ended_at"),)  # migration 0007
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     scope: Mapped[str] = mapped_column(String(16))
     target: Mapped[str | None] = mapped_column(String(256), nullable=True)

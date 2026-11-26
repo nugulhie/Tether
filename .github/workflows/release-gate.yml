@@ -1,0 +1,62 @@
+# Release gate (ADR 0002, A-6; docs/release.md). Together with "test", these must pass before a version ships:
+#   schema  - migrations on Postgres match the models, roll back and replay (app.schema_check)
+#   images  - every image builds, sandbox images included
+#   smoke   - the control plane as built images, in development mode, talking to each other (infra/ci/smoke.py)
+# Make "schema", "images" and "smoke" required status checks on main next to "test".
+name: release-gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+permissions:
+  contents: read
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_DB: tether, POSTGRES_USER: agent, POSTGRES_PASSWORD: agent}
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U agent -d tether" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Migrations on Postgres match the models and roll back
+        working-directory: services/policy-api
+        env:
+          DATABASE_URL: postgresql+psycopg://agent:agent@localhost:5432/tether
+        run: >
+          uv run -q --no-project --python 3.13 --with-editable ../policy-compiler --with fastapi --with sqlalchemy
+          --with alembic --with pydantic --with 'PyJWT[crypto]' --with 'psycopg[binary]' python -W ignore -m app.schema_check
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: sandbox-local-agent, dockerfile: infra/sandbox-images/local-agent/Dockerfile, context: .}
+          - {name: sandbox-coding-agents, dockerfile: infra/sandbox-images/coding-agents/Dockerfile, context: .}
+          - {name: gateway-interceptor, dockerfile: services/gateway-interceptor/Dockerfile, context: services/gateway-interceptor}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.name }}
+        run: docker build -f ${{ matrix.dockerfile }} -t tether/${{ matrix.name }}:ci ${{ matrix.context }}
+
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Builds the policy-api, credential-broker, llm-gateway and sandbox-orchestrator images and runs them.
+      - run: make smoke
+      - name: Service logs
+        if: failure()
+        run: cat infra/ci/smoke.log
