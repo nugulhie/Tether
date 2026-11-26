@@ -97,3 +97,13 @@ LLM gateway ─mTLS(llm-gateway.tether.internal)─▶ inference-proxy :8443 (�
 - `tether-agent`: 지시문을 고쳐 `finish`의 내용이 결과 그 자체가 되게 했다("파일을 만들었다"가 아니라 요약 본문). 답변 끝에 모델이 아니라 `git status`가 확인한 변경 파일 목록을 붙인다. 이미지를 다시 만들어 digest를 `.env`에 고정했다.
 - 셸 도구 시간 초과: macOS는 프로세스 그룹에 SIGKILL을 하나씩 보내서, 자식이 먼저 죽으면 셸이 다음 명령을 실행했다(`sleep 30; echo never`가 "never" 출력, 테스트가 가끔 실패). 셸을 먼저 죽이고 그룹을 죽인다. 리눅스(실서버)에서는 재현되지 않았다.
 - `50-e2e.py`에 실제 job 7개 항목: 요청 → 승인 → orchestrator로 실행(GitHub에서 clone, 로컬 모델) → 결과 저장 → 주인이 답변(변경 파일 목록)과 패치(`E2E.txt`) 조회 → 다른 사람은 404. 33개 통과.
+
+## 2026-11-26 외부 모델(Claude Code, Codex) 샌드박스
+- 이미지: `infra/sandbox-images/coding-agents` → `127.0.0.1:5000/tether/sandbox-coding-agents`(digest 고정). `SANDBOX_IMAGE`는 이 이미지, `LOCAL_AGENT_IMAGE`는 local-agent, `ALLOWED_SANDBOX_IMAGES`는 둘 다.
+  ```bash
+  docker build -f infra/sandbox-images/coding-agents/Dockerfile -t 127.0.0.1:5000/tether/sandbox-coding-agents:0.1.0 .
+  docker push 127.0.0.1:5000/tether/sandbox-coding-agents:0.1.0
+  docker image inspect 127.0.0.1:5000/tether/sandbox-coding-agents:0.1.0 --format '{{index .RepoDigests 0}}'   # infra/.env에
+  ```
+- 두 에이전트는 네이티브 실행 파일이라 `/usr/local/libexec/tether/{claude,codex}`에 실제 파일로 둔다. OpenShell은 실제 경로로 게이트웨이 접속을 허용하고(`tether-llm` 프로파일, 정책 `agent_binaries`), Landlock은 `/usr`만 읽기·실행을 허용한다(`/opt`에 두면 실행 불가).
+- 회사 키: 서버 `infra/.env`에 `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`를 넣고 `30-control-plane.sh`. 없으면 게이트웨이가 503 "not configured on this gateway". e2e는 키가 있으면 실제 응답까지 확인한다.

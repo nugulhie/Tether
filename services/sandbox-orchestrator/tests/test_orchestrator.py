@@ -233,3 +233,17 @@ def test_missing_openshell_cli_is_a_clean_error(monkeypatch, tmp_path):
     monkeypatch.setattr(o, "openshell", OpenShell("/nonexistent/openshell"))
     r = launch()
     assert r.status_code == 502 and "cannot run" in r.json()["detail"]
+
+
+def test_agents_reach_only_the_gateway_and_keep_state_in_tmp():
+    from orchestrator.agents import agent_command
+    argv, e = agent_command("claude", "https://gw.example")
+    assert argv[:2] == ["sh", "-c"] and 'exec "$0" "$@"' in argv[2] and argv[3:] == ["claude"] and e["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+    assert e["CLAUDE_CONFIG_DIR"].startswith("/tmp/") and e["CODEX_HOME"].startswith("/tmp/")
+    argv, e = agent_command("codex", "https://gw.example")
+    config = [argv[i + 1] for i, a in enumerate(argv) if a == "-c"]
+    assert argv[3] == "codex" and 'model_provider="tether"' in config
+    assert 'model_providers.tether.base_url="https://gw.example/openai/v1"' in config
+    # The placeholder the tether-llm provider injects; no real key is ever in the sandbox.
+    assert 'model_providers.tether.env_key="TETHER_LLM_TOKEN"' in config
+    assert not any(k.endswith("API_KEY") for k in e)

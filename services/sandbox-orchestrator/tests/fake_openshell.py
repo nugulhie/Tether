@@ -48,6 +48,8 @@ if cmd == ["sandbox", "exec"]:
         sys.exit(int(os.environ.get("FAKE_AGENT_RC", "0")))
     envs = dict(a.split("=", 1) for a in argv[argv.index("--tty"):argv.index("--")] if "=" in a)
     cols, rows = os.get_terminal_size(0)
+    if cmdline[:2] == ["sh", "-c"]:  # agents.PREPARE: the agent is what the shell execs
+        cmdline = cmdline[3:]
     print(f"agent={cmdline[0]} tty={os.isatty(0)} size={cols}x{rows} base={envs.get('ANTHROPIC_BASE_URL')}", flush=True)
     line = sys.stdin.readline().strip()
     print(f"got:{line}", flush=True)

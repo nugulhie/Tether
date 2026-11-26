@@ -439,3 +439,14 @@ def test_upstream_stream_error_is_not_reported_as_a_guardrail_failure(monkeypatc
     with pytest.raises(httpx.ReadError):
         post(client())
     assert events(w, "guardrail.error") == []
+
+
+@pytest.mark.parametrize("provider, path, key", [("anthropic", "/anthropic/v1/messages", "ANTHROPIC_API_KEY"),
+                                                 ("openai", "/openai/v1/responses", "OPENAI_API_KEY")])
+def test_provider_without_a_company_key_is_refused_plainly(monkeypatch, provider, path, key):
+    w = World(monkeypatch)
+    monkeypatch.setenv(key, "")
+    r = post(client(), path=path)
+    assert r.status_code == 503 and "not configured on this gateway" in r.text
+    assert w.upstream == [] and w.contents == []  # nothing sent, nothing stored
+    assert w.audits[-1]["event_type"] == "llm.denied" and w.audits[-1]["data"]["provider"] == provider

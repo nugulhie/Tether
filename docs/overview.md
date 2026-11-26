@@ -68,9 +68,9 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 | **런처** | `agent-launcher/` | OIDC 로그인(device flow) 또는 SSO가 없으면 개인 인증서 로그인(토큰 자동 갱신), 실행 요청, WebSocket 터미널, `tether job`(요청·승인·실행·결과 조회), `tether setup`(관리자가 준 인증서 폴더 설치). MDM 관리 설정 우선. macOS 서명/패키징 스크립트 | 구현, 테스트 41 |
 | **Policy API** | `services/policy-api/` | 아래 표 참고 | 구현, 테스트 203 |
 | **정책 컴파일러** | `services/policy-compiler/` | 회사 정책을 OpenShell 정책으로 변환, 검증, 번들 서명(Ed25519) CLI. 호스트 별칭·IP·플랫폼 호스트 허용 거부 | 구현, 테스트 99 |
-| **샌드박스 오케스트레이터** | `services/sandbox-orchestrator/` | gateway 자격 유일 보유. 세션, 자격증명, provider, 샌드박스 생성, 레포 클론, 터미널 중계, 킬 스위치. 관리자가 승인한 로컬 에이전트 job 실행(사람·스케줄), 지시문은 파일로 전달, 실행 결과(답변·로그 끝·저장소 패치)를 샌드박스 삭제 전에 Policy API로 | 구현, 테스트 37 |
+| **샌드박스 오케스트레이터** | `services/sandbox-orchestrator/` | gateway 자격 유일 보유. 세션, 자격증명, provider, 샌드박스 생성, 레포 클론, 터미널 중계, 킬 스위치. 관리자가 승인한 로컬 에이전트 job 실행(사람·스케줄), 지시문은 파일로 전달, 실행 결과(답변·로그 끝·저장소 패치)를 샌드박스 삭제 전에 Policy API로 | 구현, 테스트 38 |
 | **Gateway Interceptor** | `services/gateway-interceptor/` | OpenShell gRPC 확장. 발급된 이름과 정책만 허용, 정책 확대와 우회 경로 차단, 회사 프로필 공급 | 구현, 테스트 92 |
-| **LLM 게이트웨이** | `services/llm-gateway/` | 모델로 가는 유일한 경로. 세션 토큰 + egress IP 확인, 회사 키 사용, 모델 허용 목록, 사용량 감사. 자체 GPU 추론 서버(`local`, mTLS), 가드레일(fail-closed, break-glass), 프롬프트·응답 본문 감사 ([ADR 0001](adr/0001-local-llm-agent-control.md)) | 구현, 테스트 75 |
+| **LLM 게이트웨이** | `services/llm-gateway/` | 모델로 가는 유일한 경로. 세션 토큰 + egress IP 확인, 회사 키 사용, 모델 허용 목록, 사용량 감사. 자체 GPU 추론 서버(`local`, mTLS), 가드레일(fail-closed, break-glass), 프롬프트·응답 본문 감사 ([ADR 0001](adr/0001-local-llm-agent-control.md)) | 구현, 테스트 77 |
 | **Credential Broker** | `services/credential-broker/` | STS(SourceIdentity, 세션 태그), GitHub App 토큰(레포 1개), 발급 기록(암호화), 회수 | 구현, 테스트 28 |
 | **Permission MCP** | `services/permission-mcp/` | 샌드박스 안 에이전트용 권한 질의 도구(세션 토큰 기반) | 구현 |
 | **로컬 에이전트** | `local-agent/`, `infra/sandbox-images/local-agent/` | job 샌드박스에서 도는 OpenAI 호환 도구 호출 루프(파일·셸 도구, 작업 디렉터리 밖 접근 거부). 최종 답변에 결과 본문과 git이 확인한 변경 파일 목록. 단일 실행 파일과 샌드박스 이미지 | 구현, 테스트 24 |
@@ -265,7 +265,7 @@ sequenceDiagram
 
 | 구분 | 내용 |
 |---|---|
-| 단위·통합 테스트 | `make test`: Python 724개(컴파일러 99, Policy API 203, Broker 28, LLM Gateway 75, Orchestrator 37, Interceptor 92, GitHub 동기화 7, 런처 41, MDM 생성기 6, 로컬 에이전트 24, GPU 네트워크 71, 서명 41) |
+| 단위·통합 테스트 | `make test`: Python 727개(컴파일러 99, Policy API 203, Broker 28, LLM Gateway 77, Orchestrator 38, Interceptor 92, GitHub 동기화 7, 런처 41, MDM 생성기 6, 로컬 에이전트 24, GPU 네트워크 71, 서명 41) |
 | 실제 프로세스 E2E | 실제 TTY 런처 → WebSocket → 서버 PTY → (가짜) OpenShell exec, 입력 중계와 종료 코드 |
 | 컨테이너 E2E | 마이그레이션(기존 볼륨, 0001→0005), 오케스트레이터 전용 세션, LLM 게이트웨이(개인 토큰과 미허용 모델 거부, Anthropic까지 중계), interceptor gRPC 공격 시나리오, 킬 스위치, SIEM 조회 |
 | GPU 경계 E2E | Docker에서 생성한 envoy 설정과 nftables 적용 후 `verify.py`: 샌드박스 쪽 6/6, gateway 쪽 9/9 통과. `sshd -T`로 GPU 호스트·bastion 설정 확인 |

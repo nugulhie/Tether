@@ -40,6 +40,8 @@ llm:
 # Local-LLM agent jobs need their binary here, e.g. (top-level key; tether-agent is the image
 # infra/sandbox-images/local-agent):
 # agent_binaries: [/usr/local/bin/node, /usr/local/bin/tether-agent]
+# The image infra/sandbox-images/coding-agents runs Claude Code and Codex as native executables:
+# agent_binaries: [/usr/local/libexec/tether/claude, /usr/local/libexec/tether/codex]
 # Prompt/response guardrails, enforced inline by the LLM gateway for every provider.
 # A guardrail error always denies the request (on_error: deny); only an administrator's
 # time-limited, audited bypass (POST /v1/admin/guardrails/bypass) lifts that.

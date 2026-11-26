@@ -30,8 +30,9 @@ endpoints:
     enforcement: enforce
     access: read-write
 # Real paths only (`readlink -f` inside the image): OpenShell matches the connecting process's real
-# executable or any ancestor. npm's /usr/local/bin/claude and /usr/local/bin/codex are symlinks to
-# JavaScript run by node, so node is what matches. tether-agent: the local-LLM job agent (local-agent/,
-# image infra/sandbox-images/local-agent), a real file. Binaries gate network admission only; the
+# executable or any ancestor. Claude Code and Codex are native executables, copied to /usr/local/libexec/tether as
+# real files by infra/sandbox-images/coding-agents (/usr/local/bin/{claude,codex} there are symlinks and
+# never match). node: JavaScript agents installed from npm. tether-agent: the local-LLM job agent
+# (image infra/sandbox-images/local-agent), a real file. Binaries gate network admission only; the
 # placeholder itself is endpoint-scoped (docs/threat-model.md).
-binaries: [/usr/local/bin/node, /usr/local/bin/tether-agent]
+binaries: [/usr/local/libexec/tether/claude, /usr/local/libexec/tether/codex, /usr/local/bin/node, /usr/local/bin/tether-agent]

@@ -309,6 +309,11 @@ async def proxy(provider: str, path: str, request: Request):
     check_source(request)
     s = await resolve_session(session_token(request))
     rate_limit(s)
+    if p["key"] and not env(p["key"]).strip():
+        # No company key for this provider on this install: say so plainly, before anything is stored or sent
+        # (an empty key would otherwise surface as an upstream 401 or an unreadable transport error).
+        await report(s, "llm.denied", f"provider {provider} is not configured", {"provider": provider, "path": path}, success=False)
+        return JSONResponse(error_body(provider, "api_error", f"{provider} is not configured on this gateway (no company API key)"), status_code=503)
     body = await request.body()
     try:
         model = check_model(s, provider, body) if request.method == "POST" else None

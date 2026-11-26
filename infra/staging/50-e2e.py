@@ -6,10 +6,12 @@ Runs on the gateway host from the repository root after 30-control-plane.sh and 
 It drives the gateway with the orchestrator's own OpenShell wrapper (the same CLI calls the orchestrator
 makes), but without GitHub: the github-org provider gets a placeholder credential and nothing is cloned.
 
-Steps: issue a session (Policy API) -> providers -> create the sandbox from SANDBOX_IMAGE -> checks
+Steps: issue a session (Policy API) -> providers -> create the sandbox from LOCAL_AGENT_IMAGE -> checks
 inside it -> attempt to widen it -> kill switch (revoke, delete) -> re-creation refused.
 Then one real job through the orchestrator (clones E2E_REPO from GitHub, runs the local model): request ->
 approve -> run -> its owner reads the answer and patch; another person cannot.
+Then Claude Code and Codex in a sandbox from SANDBOX_IMAGE (infra/sandbox-images/coding-agents): their prompts
+reach the LLM gateway and are recorded; with ANTHROPIC_API_KEY / OPENAI_API_KEY set, the model answers.
 Exit status is the number of failed checks. Stdlib only; reads tokens from infra/.env.
 """
 import asyncio
@@ -28,12 +30,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "services/sandbox-orchestrator"))
 from orchestrator.openshell import OpenShell, OpenShellError  # noqa: E402
+from orchestrator.agents import agent_command  # noqa: E402
 
 ENV = dict(line.split("=", 1) for line in (ROOT / "infra/.env").read_text().splitlines() if "=" in line and not line.startswith("#"))
 POLICY_API = "http://127.0.0.1:8080"
 ORCHESTRATOR = "http://172.30.0.1:8083"   # compose.staging.yml: the orchestrator listens on the compose network's gateway address
 E2E_REPO = ENV.get("E2E_REPO", "https://github.com/nugulhie/Tether")   # public, in GITHUB_ORG
-IMAGE = ENV["SANDBOX_IMAGE"]
+# The lifecycle checks use tether-agent and python3.13, which are in the local-agent image.
+IMAGE = ENV.get("LOCAL_AGENT_IMAGE") or ENV["SANDBOX_IMAGE"]
+AGENTS_IMAGE = ENV["SANDBOX_IMAGE"]
 PLATFORM = "host.openshell.internal"   # PLATFORM_LLM_GATEWAY_HOST / PLATFORM_POLICY_API_HOST in compose.staging.yml
 MODEL = ENV.get("STAGING_MODEL", "qwen3.5:122b")
 gw = OpenShell()
@@ -231,7 +236,52 @@ def job_checks():
         api("POST", f"/v1/admin/agent/jobs/{j['id']}/disable", admin, {"reason": "staging e2e finished"})
 
 
+async def coding_agent_checks():
+    """Claude Code and Codex as the orchestrator runs them (same argv and environment), non-interactively."""
+    admin = person_token("e2e-admin", ["tether-admins"])
+    for agent, prompt_args, key in [("claude", ["-p", "Reply with exactly: TETHER-OK"], "ANTHROPIC_API_KEY"),
+                                    ("codex", ["exec", "--skip-git-repo-check", "Reply with exactly: TETHER-OK"], "OPENAI_API_KEY")]:
+        status, s = api("POST", "/v1/agent/sessions", ENV["ORCHESTRATOR_TOKEN"],
+                        {"user_token": person_token(f"e2e-{secrets.token_hex(3)}"), "device_id": "staging", "agent": agent,
+                         "repo": "https://github.com/your-org/demo", "environment": "development"})
+        check(f"{agent}: session issued", status == 200, s)
+        if status != 200:
+            continue
+        name, providers = s["sandbox_name"], list(s["providers"])
+        creds = {"tether-llm": {"ANTHROPIC_AUTH_TOKEN": s["session_token"], "TETHER_LLM_TOKEN": s["session_token"]},
+                 "tether-policy": {"TETHER_SESSION_TOKEN": s["session_token"]},
+                 "github-org": {"GITHUB_TOKEN": "staging-placeholder", "GH_TOKEN": "staging-placeholder"}}
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            json.dump(s["openshell_policy"], f)
+            policy_file = f.name
+        try:
+            for pname, profile in s["providers"].items():
+                await gw.upsert_provider(pname, profile, creds[profile])
+            await gw.create_sandbox(name, AGENTS_IMAGE, policy_file, providers, {"managed-by": "tether-staging-e2e", "session": s["session_id"]})
+            argv, agent_env = agent_command(agent, f"https://{PLATFORM}")
+            rc, out, err = await gw.exec(name, [*argv, *prompt_args], "/workspace", env=agent_env)
+            tail = (out + err).strip()[-400:]
+            status, c = api("GET", f"/v1/audit/content?session_id={s['session_id']}", admin)
+            recorded = status == 200 and any(x["direction"] == "request" for x in c["contents"])
+            if ENV.get(key):
+                check(f"{agent}: prompt reached the LLM gateway and was recorded", recorded, f"rc={rc} {tail}")
+            else:  # no company key: the gateway answers that the provider is not configured, before storing anything
+                check(f"{agent}: reaches the LLM gateway (provider not configured there)", "not configured on this gateway" in out + err, f"rc={rc} {tail}")
+            if ENV.get(key):
+                check(f"{agent}: external model answers through the gateway", rc == 0 and "TETHER-OK" in out, f"rc={rc} {tail}")
+            else:
+                print(f"     ({agent}: {key} is not set on the gateway, so the model call itself is not checked)")
+        finally:
+            Path(policy_file).unlink()
+            api("POST", "/v1/admin/sessions/revoke", admin, {"session_id": s["session_id"], "reason": "staging e2e"})
+            if await gw.sandbox_exists(name):
+                await gw.delete_sandboxes([name])
+            for pname in providers:
+                await gw.run("provider", "delete", pname, check=False)
+
+
 asyncio.run(main())
 job_checks()
+asyncio.run(coding_agent_checks())
 print(f"\n{len(failures)} failed" + (": " + ", ".join(failures) if failures else ""))
 sys.exit(len(failures))

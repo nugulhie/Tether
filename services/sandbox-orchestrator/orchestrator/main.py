@@ -30,6 +30,7 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
+from .agents import AGENTS, agent_command
 from .openshell import MAX_EXEC_STDIN_BYTES, OpenShell, OpenShellError
 from .relay import Relay
 
@@ -48,7 +49,6 @@ app = FastAPI(title="Company Agent Sandbox Orchestrator", lifespan=lifespan)
 openshell = OpenShell(os.environ.get("OPENSHELL_BIN", "openshell"))
 http_transport = None  # overridable in tests
 TICKET_SECONDS = 60
-AGENTS = {"claude": ["claude"], "codex": ["codex"]}
 
 
 def env(name, default=""):
@@ -235,9 +235,8 @@ async def attach(ws: WebSocket, ticket: str, rows: int = 24, cols: int = 80):
         await ws.close(code=4401)
         return
     await ws.accept()
-    agent_env = {"ANTHROPIC_BASE_URL": f"{env('LLM_GATEWAY_URL')}/anthropic", "OPENAI_BASE_URL": f"{env('LLM_GATEWAY_URL')}/openai/v1",
-                 "TETHER_POLICY_API": env("POLICY_API_PUBLIC_URL")}
-    relay = Relay(openshell.exec_tty_argv(t.sandbox, AGENTS[t.agent], t.workdir, agent_env), rows, cols)
+    argv, agent_env = agent_command(t.agent, env("LLM_GATEWAY_URL"), env("POLICY_API_PUBLIC_URL"))
+    relay = Relay(openshell.exec_tty_argv(t.sandbox, argv, t.workdir, agent_env), rows, cols)
     await relay.start()
     state.relays[t.session_id] = relay
     s = {"session_id": t.session_id, "user_id": t.user_id, "device_id": t.device_id}

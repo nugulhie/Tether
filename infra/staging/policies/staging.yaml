@@ -2,7 +2,7 @@
 # Same as policies/backend-dev.yaml plus the self-hosted model (Ollama on the GPU server) and the local agent
 # binary, which only tether-agent may use to reach the LLM gateway.
 policy_id: staging-local-llm
-version: 2
+version: 5
 priority: 10
 description: Staging - development policy with the self-hosted model.
 match:
@@ -26,8 +26,11 @@ github:
   org: nugulhie
 llm:
   local: {models: ["qwen3.5:*"]}
+  # External models (ADR 0002, P2): the gateway holds the company keys (ANTHROPIC_API_KEY, OPENAI_API_KEY).
+  anthropic: {models: ["claude-*"]}
+  openai: {models: ["gpt-*"]}
   max_requests_per_minute: 120
-agent_binaries: [/usr/local/bin/node, /usr/local/bin/tether-agent]
+agent_binaries: [/usr/local/libexec/tether/claude, /usr/local/libexec/tether/codex, /usr/local/bin/node, /usr/local/bin/tether-agent]
 guardrails:
   input: {secrets: true, pii: true, deny_patterns: []}
   output: {secrets: true, pii: false}
