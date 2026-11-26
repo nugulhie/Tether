@@ -1,13 +1,17 @@
 # Tether: 개발 현황 및 동작 개요
 
-> 작성일: 2026-10-02
+> 작성일: 2026-10-02 · 갱신: 2026-11-26
 >
 > **함께 볼 문서**
 > - 상세 설계: [architecture.md](architecture.md)
 > - 우회 경로 분석: [threat-model.md](threat-model.md)
-> - 배포 할 일: [production-checklist.md](production-checklist.md)
+> - 사용 안내(직원·관리자): [usage.md](usage.md)
 > - 사고 대응: [incident-response.md](incident-response.md)
-> - 로컬 LLM(GPU) 에이전트 관제 확장(제안): [adr/0001-local-llm-agent-control.md](adr/0001-local-llm-agent-control.md)
+> - 판매용 제품 형태와 로드맵: [adr/0002-sellable-self-hosted-product.md](adr/0002-sellable-self-hosted-product.md)
+> - 출고 기준: [release.md](release.md) · 설치 프로그램 설계: [install-design.md](install-design.md)
+> - 로컬 LLM(GPU) 에이전트 관제: [adr/0001-local-llm-agent-control.md](adr/0001-local-llm-agent-control.md)
+> - 단일 서버 시범 운영: [infra/staging/README.md](../infra/staging/README.md)
+> - 환경별 배포 할 일: [production-checklist.md](production-checklist.md)
 
 ## 1. 목표와 보안 불변식
 
@@ -73,6 +77,7 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 | **LLM 게이트웨이** | `services/llm-gateway/` | 모델로 가는 유일한 경로. 세션 토큰 + egress IP 확인, 회사 키 사용, 모델 허용 목록, 사용량 감사. 자체 GPU 추론 서버(`local`, mTLS), 가드레일(fail-closed, break-glass), 프롬프트·응답 본문 감사 ([ADR 0001](adr/0001-local-llm-agent-control.md)) | 구현, 테스트 77 |
 | **Credential Broker** | `services/credential-broker/` | STS(SourceIdentity, 세션 태그), GitHub App 토큰(레포 1개), 발급 기록(암호화), 회수 | 구현, 테스트 28 |
 | **Permission MCP** | `services/permission-mcp/` | 샌드박스 안 에이전트용 권한 질의 도구(세션 토큰 기반) | 구현 |
+| **코딩 에이전트 이미지** | `infra/sandbox-images/coding-agents/` | 외부 모델용 샌드박스 이미지. 버전 고정한 Claude Code·Codex 실행 파일을 정책이 허용하는 경로(`/usr/local/libexec/tether`)에 두고, 오케스트레이터가 둘 다 게이트웨이로 향하게 설정(`orchestrator/agents.py`) | 구현, 실서버 e2e |
 | **로컬 에이전트** | `local-agent/`, `infra/sandbox-images/local-agent/` | job 샌드박스에서 도는 OpenAI 호환 도구 호출 루프(파일·셸 도구, 작업 디렉터리 밖 접근 거부). 최종 답변에 결과 본문과 git이 확인한 변경 파일 목록. 단일 실행 파일과 샌드박스 이미지 | 구현, 테스트 24 |
 | **GPU 네트워크·SSH 강제** | `infra/gpu/network/` | 단일 설정에서 nftables, envoy mTLS 프록시, K8s NetworkPolicy, sshd/bastion 설정 생성. 양방향 검증 도구(`verify.py`) | 구현, 테스트 71 |
 | **가중치·이미지 서명** | `infra/gpu/signing/` | 가중치 매니페스트 Ed25519 서명·검증(safetensors만), cosign 이미지 검증, systemd `ExecStartPre`·policy-controller | 구현, 테스트 41 |
@@ -81,7 +86,8 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 | **OpenShell 설정** | `openshell/profiles/`, `infra/openshell/` | 목적지에 묶인 provider 프로필 3종, gateway interceptor TOML | 작성 |
 | **GitHub 동기화** | `infra/github/` | Enterprise Cloud IP allow list 동기화. 노트북 GitHub 접근을 막지 않기로 해서 지금은 쓰지 않음(보관) | 구현, 테스트 7 |
 | **로컬 스택** | `infra/docker-compose.yml` | postgres와 서비스 6개(개발 모드) | 동작 확인 |
-| **단일 서버 운영(온프레미스)** | `infra/staging/`, `infra/pki/` | GPU 서버 한 대에 전부: OpenShell gateway, 컨트롤 플레인, TLS 앞단(샌드박스용·직원용), Ollama 앞 mTLS 프록시. 사내 CA와 정책 서명 키는 관리자 Mac에. 개인 인증서, 서명된 정책 발행, Mac으로 당겨 오는 백업, 자동 롤백 방화벽 | 실서버(OpenShell 0.1.9)에서 e2e 33개(실제 job 실행과 결과·패치 조회, 다른 사람 조회 거부 포함). 방화벽 적용(비영구) |
+| **단일 서버 운영(온프레미스)** | `infra/staging/`, `infra/pki/` | GPU 서버 한 대에 전부: OpenShell gateway, 컨트롤 플레인, TLS 앞단(샌드박스용·직원용), Ollama 앞 mTLS 프록시. 사내 CA와 정책 서명 키는 관리자 Mac에. 개인 인증서, 서명된 정책 발행, Mac으로 당겨 오는 백업, 자동 롤백 방화벽 | 실서버(OpenShell 0.1.9)에서 e2e 37개(실제 job 실행과 결과·패치 조회, 다른 사람 조회 거부, Claude Code·Codex의 게이트웨이 경유 포함). 방화벽 적용(비영구) |
+| **출고 검사(CI)** | `.github/workflows/release-gate.yml`, `infra/ci/` | 실제 Postgres에서 마이그레이션과 모델 일치·되돌리기, 이미지 빌드, 빌드한 이미지끼리 붙는지(`make smoke`). 기준은 [release.md](release.md) | 구현, 로컬 smoke 10개 |
 
 **Policy API가 하는 일**
 - OIDC 인증 또는 개인 인증서 인증(`AUTH_MODE=mtls`: 앞단 mTLS 프록시가 확인한 인증서를 1시간 토큰으로 교환), 세션 생성(오케스트레이터 전용), 권한 판정
@@ -89,8 +95,9 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 - 정책 번들 게시, 정책 선택, 감사 로그(OCSF)
 - 킬 스위치, SIEM용 조회 API
 - 로컬 에이전트 job: 요청 → 관리자 승인 → 실행, 실행 결과(답변·로그 끝·패치)를 암호화해 보관하고 job 주인(과 관리자)만 조회(`GET /v1/agent/jobs/{id}/runs/...`, 조회도 감사). 본문 보존 기간과 법적 보존을 그대로 따름
-- interceptor와 LLM 게이트웨이용 조회 API, Alembic 마이그레이션 11개(0005에서 기기 테이블 삭제)
+- interceptor와 LLM 게이트웨이용 조회 API, Alembic 마이그레이션 13개(0005에서 기기 테이블 삭제, 0012 내용 키 id, 0013 NOT NULL 정합)
 - 프롬프트·응답 본문 보존(`CONTENT_RETENTION_DAYS`, 기본 90일)과 파기(`python -m app.purge`), 법적 보존(hold)
+- 내용 암호화 키 묶음과 교체(`CONTENT_ENCRYPTION_KEYS`, `python -m app.rekey`, `GET /v1/admin/audit/content/keys`)
 
 **노트북 통제(MDM)가 하는 일**
 - Claude Code가 회사 LLM 게이트웨이 외에는 연결하지 못하게 고정합니다. 게이트웨이는 샌드박스에서 온 요청만 받으므로, 노트북의 Claude Code는 개인 로그인을 포함해 동작하지 않습니다.
@@ -109,6 +116,9 @@ Claude Code와 Codex 같은 AI 코딩 에이전트를 회사 통제 안에서만
 | **우회 경로 제거** | 원격 샌드박스 전환(오케스트레이터, 터미널 중계). LLM 게이트웨이. 오케스트레이터만 세션 생성. GitHub org 경로 제한과 레지스트리 read-only. 모델 host 직접 허용 금지. 자격증명 목적지 묶기. 킬 스위치 완성(STS 거부, GitHub 토큰 폐기). GitHub IP allow list 동기화. |
 | **Gateway Interceptor** | 발급된 이름과 정책만 허용하고, 정책과 provider를 강제로 교체. 확대와 우회 경로(Attach, 초안 승인, SSH, 서비스 노출, 프로필 변경) 차단. 회사 프로필 공급. gateway JWT 검증. 삭제 계열은 바인딩하지 않음. |
 | **Apple 의존 제거, MDM 통제** | Endpoint Security와 Network Extension 확장, 기기 heartbeat를 제거(마이그레이션 0005). 런처는 Developer ID 없이 빌드. Claude Code 관리 설정(노트북·샌드박스) 생성기 추가. DNS 차단은 검토 후 제외. 노트북 GitHub 접근은 막지 않기로 결정. |
+| **로컬 LLM 관제 ([ADR 0001](adr/0001-local-llm-agent-control.md))** | 자체 GPU 추론 서버(`local` 공급자, mTLS), 가드레일(fail-closed, break-glass), 프롬프트·응답 암호화 보관과 법적 보존, 관리자 승인 job으로만 도는 로컬 에이전트, GPU 네트워크·SSH 강제와 가중치·이미지 서명. |
+| **단일 서버 시범 운영** | GPU 서버 한 대(`infra/staging/`): SSO 없는 곳을 위한 개인 인증서 로그인(`AUTH_MODE=mtls`), 감사 해시 체인, Mac으로 당겨 오는 백업, 자동 롤백 방화벽, `tether setup`, job 결과·패치 조회. |
+| **판매용 제품화 ([ADR 0002](adr/0002-sellable-self-hosted-product.md), 진행 중)** | 고객사 설치형으로 결정. 내용 키 교체(A-3), 외부 모델 샌드박스 이미지와 미설정 공급자 거부(A-5), 출고 검사 CI(A-6), 설치 프로그램 설계(A-1). |
 
 ---
 
@@ -233,8 +243,9 @@ sequenceDiagram
 | `session.create`, `permission.check`, `policy.publish`, `session.revoke` | Policy API |
 | `sandbox.create`, `sandbox.reuse`, `agent.exit`, `sandbox.delete` | Orchestrator |
 | `credential.issue` | Broker |
-| `llm.request`, `guardrail.block`, `guardrail.error` | LLM Gateway |
-| `llm.content`, `audit.content.read`, `guardrail.bypass.start`, `guardrail.bypass.end` | Policy API |
+| `llm.request`, `llm.denied`, `guardrail.block`, `guardrail.error` | LLM Gateway |
+| `llm.content`, `audit.content.read`, `audit.content.hold.start`/`.end`, `audit.content.purge`, `audit.content.rekey`, `guardrail.bypass.start`/`.end` | Policy API |
+| `agent.job.request`/`.approve`/`.reject`/`.disable`, `agent.job.result`, `agent.job.result.read`, `auth.token.issue`, `session.end` | Policy API |
 
 위 이벤트는 모두 OCSF 형식으로 저장되고, stdout JSON과 `GET /v1/audit/events`(SIEM 조회)로 수집할 수 있습니다. actor는 항상 서버가 인증한 신원에서 정합니다. 사용자는 이벤트를 보고할 수 없습니다.
 
@@ -271,24 +282,29 @@ sequenceDiagram
 | GPU 경계 E2E | Docker에서 생성한 envoy 설정과 nftables 적용 후 `verify.py`: 샌드박스 쪽 6/6, gateway 쪽 9/9 통과. `sshd -T`로 GPU 호스트·bastion 설정 확인 |
 | 빌드 | 로컬 에이전트 이미지(arm64)와 가짜 gateway 대상 실행, Docker 이미지 6종, 런처 PyInstaller(ad-hoc 서명)와 pkg, MDM 프로필 형식 검사(`plutil`) |
 
+| 실서버 E2E | 시범 서버(OpenShell 0.1.9, `infra/staging/50-e2e.py`) 37개: 승인되지 않은 이미지 거부, 샌드박스 권한·파일·네트워크 제한, 정책 확대 거부, 긴급 차단, 로컬 모델 job 실행과 결과, Claude Code·Codex의 게이트웨이 경유 |
+| 출고 검사 | Postgres 스키마 검사(마이그레이션 = 모델, 되돌리기), 이미지 빌드, compose smoke 10개([release.md](release.md)) |
+
 **검증하지 못한 부분** (실제 환경이 필요함)
-- OpenShell gateway와 CLI 실제 연동: provider, policy set, exec, interceptor 정규화 동작, 프로필 문법 검사(`profile lint`), github-org 프로필에서의 git 인증 방식
+- 외부 모델 실제 응답: 서버에 회사 API 키(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`)를 넣은 뒤
+- 깨끗한 Ubuntu 24.04 VM에 설치 프로그램으로 처음부터 설치(설치 프로그램 구현 뒤)
+- 원격(Kubernetes) OpenShell gateway, 고정 IP egress 프록시, interceptor TLS 배포. 시범 서버는 한 대에 모두 둠
 - MDM: 실제 Mac에 Claude Code 프로필 적용, Claude Code `/status` 확인
-- 실제 IdP, AWS STS와 IAM, GitHub App
-- GitHub Actions 정책 파이프라인
-- GPU 서버: 실제 호스트의 nftables·tlog·auditd, 실제 cosign과 policy-controller, `openshell sandbox exec`의 stdin 전달(로컬 에이전트 지시문 파일)
+- 실제 IdP(OIDC), AWS STS와 IAM, GitHub App(비공개 저장소)
+- CI에서의 정책 서명·게시(`POLICY_PUBLISH`). 시범 서버는 관리자 Mac에서 서명
+- GPU 서버: tlog·auditd, 실제 cosign과 policy-controller
 
 ---
 
 ## 8. 남은 작업 (요약)
 
-전체 목록은 [production-checklist.md](production-checklist.md)에 있습니다.
+제품으로 만드는 작업(설치 프로그램, 업그레이드·백업, 키 공급자, OIDC 기본, 서명, 웹 관리 화면 등)은 [ADR 0002](adr/0002-sellable-self-hosted-product.md) 4절 로드맵에서 관리합니다. 환경별 배포 할 일은 [production-checklist.md](production-checklist.md)에 있습니다.
 
 - **인프라:** 원격 OpenShell gateway(K8s), 고정 IP egress 프록시, mTLS 프록시와 기기 인증서, interceptor TLS와 gateway 공개키, SIEM 연동
 - **자리표시자 교체:** `your-org`, 내부 호스트명, `infra/mdm/config.yaml`(게이트웨이 URL, 프로필 접두사)
 - **새로 만들 것:**
   - `tether-aws` 프로필(SigV4 재서명). 그 전까지 AWS 권한은 차단 쪽으로 동작합니다.
-  - 샌드박스 이미지: Claude Code 관리 설정(`allowedProviders: ["customEndpoint"]`), Codex 게이트웨이 설정, git 인증 설정
+  - 샌드박스 이미지의 git 인증 설정(github-org 프로필과 맞춤, 비공개 저장소용). Claude Code·Codex 이미지와 게이트웨이 설정은 완료
 - **MDM:** 시범 Mac 검증 후 Claude Code 프로필과 런처 pkg 배포
 - **GitHub:** 브랜치 보호, CODEOWNERS 팀 지정, CI 시크릿, GitHub App 생성과 설치
 - **Staging:** 단일 GPU 서버 구성 절차는 [infra/staging/README.md](../infra/staging/README.md)

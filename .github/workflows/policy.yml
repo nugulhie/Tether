@@ -1,8 +1,10 @@
 # GitOps policy pipeline.
 #   pull_request: validate every policy file (required status check on main).
 #   push to main: build a bundle, sign it with the Ed25519 key, publish to the Policy API.
-# Required secrets (in the `policy-publish` environment): POLICY_SIGNING_KEY (PEM),
-# POLICY_SIGNING_KEY_ID, POLICY_PUBLISHER_TOKEN, POLICY_API_URL.
+# Publishing from CI is opt-in: set the repository variable POLICY_PUBLISH=true and these secrets
+# (in the `policy-publish` environment): POLICY_SIGNING_KEY (PEM), POLICY_SIGNING_KEY_ID,
+# POLICY_PUBLISHER_TOKEN, POLICY_API_URL. Without it, policies are signed on an administrator's machine
+# (infra/staging/80-publish-policies.sh; docs/install-design.md step 6) and only validated here.
 name: policy
 on:
   pull_request:
@@ -26,7 +28,7 @@ jobs:
       - run: tether-policy validate policies
       - run: cd services/policy-compiler && pytest -q tests
   publish:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.POLICY_PUBLISH == 'true'
     needs: validate
     runs-on: ubuntu-latest
     environment: policy-publish
