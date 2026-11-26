@@ -87,6 +87,8 @@ class LlmContent(Base):
     size: Mapped[int] = mapped_column(Integer)
     truncated: Mapped[bool] = mapped_column(Boolean, default=False)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    # Id of the key (app.content_keys) that encrypted ciphertext; "default" for rows from before keyrings.
+    key_id: Mapped[str] = mapped_column(String(32), default="default", server_default="default", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

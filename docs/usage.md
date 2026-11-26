@@ -93,6 +93,7 @@ tether job result <id>                           # 관리자는 모든 작업의
 ```
 - 관리자가 혼자라 자기 작업도 승인할 수 있고, 그 사실은 기록(`self_approved`)에 남습니다.
 - 정책 변경: `infra/staging/policies/staging.yaml` 수정 → `bash infra/staging/80-publish-policies.sh soldoc@192.168.1.27`
+- 내용 암호화 키 교체: 서버 `infra/.env`에 `CONTENT_ENCRYPTION_KEYS=<새 id>:<새 키>,default:<기존 CONTENT_ENCRYPTION_KEY 값>`을 넣고 `30-control-plane.sh` → `docker compose -f infra/docker-compose.yml -f infra/staging/compose.staging.yml exec policy-api python -m app.rekey` → `GET /v1/admin/audit/content/keys`에서 `default`가 `removable`이면 목록에서 뺍니다. 옛 키를 먼저 빼면 그 키로 저장된 내용은 읽을 수 없습니다(`missing`에 표시).
 - 긴급 중단(실행 중인 세션 종료와 샌드박스 삭제): 인증서로 토큰을 받아 `POST https://192.168.1.27/v1/admin/revoke`에 `{"user_id":"<이름>","reason":"..."}` (또는 `job_id`, `all`)
 
 ### 정기 점검

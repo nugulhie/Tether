@@ -32,6 +32,7 @@ EVENT_TYPES = {
     "audit.content.hold.start": (API_ACTIVITY, 1, "Create"),
     "audit.content.hold.end": (API_ACTIVITY, 4, "Delete"),
     "audit.content.purge": (API_ACTIVITY, 4, "Delete"),
+    "audit.content.rekey": (API_ACTIVITY, 3, "Update"),
     "guardrail.block": (API_ACTIVITY, 99, "Other"),
     "guardrail.error": (API_ACTIVITY, 99, "Other"),
     "guardrail.bypass.start": (API_ACTIVITY, 1, "Create"),

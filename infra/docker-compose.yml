@@ -35,6 +35,9 @@ services:
       # Encrypts stored prompts and responses. Without it every model request is refused.
       # Development key only: production supplies its own (Fernet, 32 url-safe base64 bytes).
       CONTENT_ENCRYPTION_KEY: "${CONTENT_ENCRYPTION_KEY:?run make dev-env to create infra/.env}"
+      # Key rotation (app/content_keys.py): "newid:<key>,default:<old key>" takes precedence over
+      # CONTENT_ENCRYPTION_KEY; the first key encrypts, all decrypt. Then `python -m app.rekey`.
+      CONTENT_ENCRYPTION_KEYS: ${CONTENT_ENCRYPTION_KEYS:-}
       GUARDRAIL_BYPASS_MAX_SECONDS: ${GUARDRAIL_BYPASS_MAX_SECONDS:-14400}
       # Production: ADMIN_GROUPS, and DEVICE_ID_HEADER behind the mTLS proxy.
       # Dev only: publish ../policies as an unsigned bundle on startup. Production loads

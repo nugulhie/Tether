@@ -10,12 +10,12 @@ from datetime import timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, delete, exists, func, or_, select
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from policy_compiler import PolicyError, compile_policy, policy_hash, static_part
 from policy_compiler import bundle as bundles
-from . import audit_chain, ocsf
+from . import audit_chain, content_keys, ocsf
 from .auth import Principal, SESSION_TOKEN_PREFIX, bearer, client_identity, env, hash_token, is_admin, issue_user_token, new_session_token, service_principal, verified_device, verify_user_token
 from .db import Session, migrate
 from .models import AgentJob, AgentJobRun, AgentSession, AuditEvent, ContentHold, GuardrailBypass, LlmContent, Policy, PolicyBundle, SessionToken, now
@@ -133,8 +133,9 @@ def load_dev_policies():
 
 @asynccontextmanager
 async def lifespan(app):
-    # A bad retention setting stops startup rather than being guessed at (see content_retention_days).
-    content_retention_days(); interval=content_purge_interval()
+    # A bad retention setting stops startup rather than being guessed at (see content_retention_days),
+    # and so do malformed content keys: better no service than bodies written under a key nobody has.
+    content_retention_days(); interval=content_purge_interval(); content_keys.load()
     # Production can set MIGRATE_ON_STARTUP=0 and run `alembic upgrade head` as a release step.
     if env("MIGRATE_ON_STARTUP","1")=="1": migrate()
     load_dev_policies()
@@ -403,21 +404,31 @@ class ContentReq(BaseModel):
     session_id:str=Id; user_id:str=Id; request_id:str=Field(min_length=1,max_length=64)
     direction:str=Field(pattern="^(request|response)$"); content:str=Field(max_length=CONTENT_MAX_CHARS); truncated:bool=False
 
-def content_cipher():
-    key=env("CONTENT_ENCRYPTION_KEY")
+def content_keyring(optional=False):
+    """The content keyring (app.content_keys). No key: 503, or None when optional. Malformed keys: always 503."""
+    try: ring=content_keys.load()
+    except content_keys.KeyringError as e: raise HTTPException(503,f"content keys are misconfigured: {e}")
     # No key, no storage: the gateway then refuses the model request instead of running it unaudited.
-    if not key: raise HTTPException(503,"CONTENT_ENCRYPTION_KEY is not configured")
-    return Fernet(key)
+    if ring is None and not optional: raise HTTPException(503,"CONTENT_ENCRYPTION_KEY is not configured")
+    return ring
+
+def decrypt_body(ring,row):
+    try: return ring.decrypt(row.key_id,row.ciphertext).decode()
+    except content_keys.MissingKey as e: raise HTTPException(500,f"content was encrypted with key {e.key_id!r}, which is not configured")
+    except InvalidToken: raise HTTPException(500,"content cannot be decrypted with the configured key")
+
+def encrypted_row(ring,raw,**fields):
+    key_id,token=ring.encrypt(raw)
+    return LlmContent(id=str(uuid.uuid4()),sha256=hashlib.sha256(raw).hexdigest(),size=len(raw),ciphertext=token,key_id=key_id,**fields)
 
 @app.post("/v1/audit/content")
 def store_content(req:ContentReq,p:Principal=Depends(require("service",service="llm-gateway"))):
     """Store one prompt or response body for the LLM gateway. The audit event gets only its id and hash."""
-    f=content_cipher(); raw=req.content.encode()
+    ring=content_keyring(); raw=req.content.encode()
     with Session() as db:
         s=db.get(AgentSession,req.session_id)
         if not s or s.user_id!=req.user_id: raise HTTPException(404,"session not found")
-        row=LlmContent(id=str(uuid.uuid4()),session_id=s.id,request_id=req.request_id,direction=req.direction,
-                       sha256=hashlib.sha256(raw).hexdigest(),size=len(raw),truncated=req.truncated,ciphertext=f.encrypt(raw))
+        row=encrypted_row(ring,raw,session_id=s.id,request_id=req.request_id,direction=req.direction,truncated=req.truncated)
         db.add(row)
         record(db,"llm.content",Principal(kind="user",user_id=s.user_id,device_id=s.device_id),source=p.user_id,session_id=s.id,
                data={"content_id":row.id,"request_id":row.request_id,"direction":row.direction,"sha256":row.sha256,"size":row.size,"truncated":row.truncated})
@@ -438,14 +449,13 @@ def list_content(session_id:str|None=None,request_id:str|None=None,p:Principal=D
 @app.get("/v1/audit/content/{content_id}")
 def read_content(content_id:str,reason:str=Query(min_length=1,max_length=500),p:Principal=Depends(require("admin"))):
     """Decrypt one body for an investigation. Every read is audited with the reader and the reason."""
-    f=content_cipher()
+    ring=content_keyring()
     with Session() as db:
         row=db.get(LlmContent,content_id)
         # Purged content is gone, like content that never existed: 404 either way. The llm.content
         # event (id, hash, size) and the audit.content.purge event remain.
         if not row: raise HTTPException(404,"content not found (it may have been purged after the retention period)")
-        try: text=f.decrypt(row.ciphertext).decode()
-        except InvalidToken: raise HTTPException(500,"content cannot be decrypted with the configured key")
+        text=decrypt_body(ring,row)
         record(db,"audit.content.read",p,source="policy-api",session_id=row.session_id,message=reason,
                data={"content_id":row.id,"request_id":row.request_id,"direction":row.direction,"reason":reason})
         db.commit()
@@ -552,6 +562,71 @@ def audit_chain_status(p:Principal=Depends(require("admin","service",service="si
 def purge_content(dry_run:bool=False,p:Principal=Depends(require("admin"))):
     """Run the retention purge now. dry_run=true only counts. Normally run by `python -m app.purge`."""
     return purge_contents(p,trigger="api",dry_run=dry_run)
+
+# --- content key rotation (ADR 0002, P3) --------------------------------------------
+
+REKEY_ACTOR=Principal(kind="service",user_id="content-rekey")
+
+def content_key_usage(db):
+    return dict(db.execute(select(LlmContent.key_id,func.count()).group_by(LlmContent.key_id)).all())
+
+def rekey_contents(actor,*,trigger,dry_run=False,batch_size=None):
+    """Re-encrypt bodies that are not on the active key with the active key, in batches.
+
+    Each row is rewritten only if it is still on the key it was read with (compare-and-set on
+    key_id), so a concurrent rekey or purge never loses or double-counts a row. Rows whose key is
+    not in the ring are left alone and counted under missing_keys: removing a key before its rows
+    were moved makes them unreadable, and this is how that shows. Plaintext hashes (sha256) do not
+    change. Emits one audit.content.rekey event with counts only, also when the run fails."""
+    ring=content_keyring(); batch=batch_size or int_env("CONTENT_REKEY_BATCH_SIZE","50",1)
+    stats={"active":ring.active,"candidates":0,"rekeyed":0,"failed":0,"missing_keys":{}}; error=None
+    try:
+        with Session() as db:
+            last=""
+            while True:
+                rows=db.execute(select(LlmContent.id,LlmContent.key_id,LlmContent.ciphertext)
+                                .where(LlmContent.key_id!=ring.active,LlmContent.id>last).order_by(LlmContent.id).limit(batch)).all()
+                if not rows: break
+                last=rows[-1].id
+                for r in rows:
+                    stats["candidates"]+=1
+                    try: raw=ring.decrypt(r.key_id,r.ciphertext)
+                    except content_keys.MissingKey:
+                        stats["missing_keys"][r.key_id]=stats["missing_keys"].get(r.key_id,0)+1; continue
+                    except InvalidToken:
+                        stats["failed"]+=1; continue
+                    if dry_run: continue
+                    key_id,token=ring.encrypt(raw)
+                    res=db.execute(update(LlmContent).where(LlmContent.id==r.id,LlmContent.key_id==r.key_id)
+                                   .values(ciphertext=token,key_id=key_id).execution_options(synchronize_session=False))
+                    stats["rekeyed"]+=res.rowcount
+                if not dry_run: db.commit()
+    except Exception as e:
+        error=e; raise
+    finally:
+        out={"trigger":trigger,"dry_run":dry_run,**stats}
+        if dry_run: out["would_rekey"]=stats["candidates"]-stats["failed"]-sum(stats["missing_keys"].values())
+        if error is not None: out["error"]=type(error).__name__
+        with Session() as db:
+            out["remaining"]=content_key_usage(db)
+            record(db,"audit.content.rekey",actor,source="policy-api",success=error is None and not stats["failed"] and not stats["missing_keys"],
+                   message=f"{'dry run: ' if dry_run else ''}{out.get('would_rekey',stats['rekeyed'])} content bodies moved to key {ring.active}",data=out)
+            db.commit()
+    return out
+
+@app.get("/v1/admin/audit/content/keys")
+def content_key_status(p:Principal=Depends(require("admin"))):
+    """Key ids in the ring and how many bodies each one encrypts. Never returns key material.
+    removable: configured ids no body uses (safe to drop); missing: ids bodies use that are not configured."""
+    ring=content_keyring()
+    with Session() as db: usage=content_key_usage(db)
+    return {"active":ring.active,"configured":ring.ids,"rows_by_key":usage,
+            "removable":[k for k in ring.ids[1:] if not usage.get(k)],"missing":sorted(k for k in usage if k not in ring.ids)}
+
+@app.post("/v1/admin/audit/content/rekey")
+def rekey_content(dry_run:bool=False,p:Principal=Depends(require("admin"))):
+    """Move bodies to the active key now. For large stores prefer `python -m app.rekey`."""
+    return rekey_contents(p,trigger="api",dry_run=dry_run)
 
 @app.post("/v1/admin/audit/content/holds")
 def start_hold(req:HoldReq,p:Principal=Depends(require("admin"))):
@@ -724,8 +799,7 @@ def store_run_result(job_id:str,req:RunResultReq,p:Principal=Depends(require("se
         s=db.get(AgentSession,req.session_id)
         if not s or s.job_id!=job_id: raise HTTPException(404,"no session of this job with this id")
         if db.get(AgentJobRun,s.id): raise HTTPException(409,"the result of this run is already stored")
-        try: f=content_cipher()
-        except HTTPException: f=None  # no key: keep the outcome, not the bodies (never store them in the clear)
+        f=content_keyring(optional=True)  # no key: keep the outcome, not the bodies (never store them in the clear)
         run=AgentJobRun(session_id=s.id,job_id=job_id,returncode=req.returncode,timed_out=req.timed_out,error=req.error,
                         output_truncated=req.output_truncated,diff_truncated=req.diff_truncated,finished_at=now())
         parts={}
@@ -733,8 +807,7 @@ def store_run_result(job_id:str,req:RunResultReq,p:Principal=Depends(require("se
             text=getattr(req,part)
             if not text or f is None: continue
             raw=text.encode()
-            row=LlmContent(id=str(uuid.uuid4()),session_id=s.id,request_id="job-run",direction=f"job.{part}",sha256=hashlib.sha256(raw).hexdigest(),
-                           size=len(raw),truncated=getattr(req,f"{part}_truncated",False),ciphertext=f.encrypt(raw))
+            row=encrypted_row(f,raw,session_id=s.id,request_id="job-run",direction=f"job.{part}",truncated=getattr(req,f"{part}_truncated",False))
             db.add(row); setattr(run,f"{part}_content_id",row.id); parts[part]={"content_id":row.id,"sha256":row.sha256,"size":row.size}
         db.add(run)
         record(db,"agent.job.result",Principal(kind="user",user_id=s.user_id,device_id=s.device_id),source=p.user_id,session_id=s.id,
@@ -775,9 +848,8 @@ def read_run(job_id:str,session_id:str,p:Principal=Depends(require("user"))):
             for part in RESULT_PARTS:
                 cid=getattr(run,f"{part}_content_id"); row=db.get(LlmContent,cid) if cid else None
                 if row is None: v[part]=None; continue
-                f=f or content_cipher()
-                try: v[part]=f.decrypt(row.ciphertext).decode()
-                except InvalidToken: raise HTTPException(500,"content cannot be decrypted with the configured key")
+                f=f or content_keyring()
+                v[part]=decrypt_body(f,row)
             v["purged"]=any(getattr(run,f"{part}_content_id") and v[part] is None for part in RESULT_PARTS)
             record(db,"agent.job.result.read",p,source="policy-api",session_id=s.id,data={"job_id":job_id,"owner_read":p.user_id==db.get(AgentJob,job_id).owner})
             db.commit()
