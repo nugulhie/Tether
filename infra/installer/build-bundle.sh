@@ -126,4 +126,4 @@ with open(os.path.join(d, "MANIFEST.json"), "w") as f:
 print(f"   {len(files)} files, {len(images)} images, migrations at {head}")
 PY
 du -sh "$dir" | sed 's/^/   /'
-echo "next, where the release key is: bash infra/installer/sign-bundle.sh <ssh-dest-of-this-host> $(cd "$dir" && pwd)"
+echo "next, on the release Mac: bash infra/installer/sign-bundle.sh <ssh-dest-of-this-host> $(cd "$dir" && pwd) agent-launcher/build/tether-<cli>.pkg"

@@ -26,8 +26,9 @@ python3 infra/staging/50-e2e.py      # "0 failed"여야 함
 ```bash
 # 빌드 서버(지금은 기준 서버)에서
 bash infra/installer/build-bundle.sh X.Y.Z "$(git rev-parse --short HEAD)" ~/tether-dist
-# 릴리스 키가 있는 관리자 Mac에서
-bash infra/installer/sign-bundle.sh soldoc@192.168.1.27 /home/soldoc/tether-dist/tether-X.Y.Z
+# 릴리스 키가 있는 관리자 Mac에서: 직원용 .pkg를 만들어 묶음에 넣고(MANIFEST에 추가) 서명
+(cd agent-launcher && ./packaging/build-macos.sh)
+bash infra/installer/sign-bundle.sh soldoc@192.168.1.27 /home/soldoc/tether-dist/tether-X.Y.Z agent-launcher/build/tether-<cli>.pkg
 # VM이 있는 서버에서: "passed"로 끝나고 종료 코드 0이어야 함
 bash infra/testvm/install-test.sh ~/tether-dist X.Y.Z <릴리스 키 지문>
 # 업그레이드: 직전 출고 버전 W를 설치·사용 → X.Y.Z로 업그레이드 → 백업·복구 연습 → W로 되돌리기 → 다시 업그레이드

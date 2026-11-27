@@ -5,11 +5,10 @@
 ## 0. 받는 것
 | 파일 | 내용 |
 |---|---|
-| `tether-<버전>.tar` | 설치 묶음(이미지, OpenShell, 설치 프로그램). 인터넷 없이 설치됩니다 |
+| `tether-<버전>.tar` | 설치 묶음(이미지, OpenShell, 설치 프로그램, 직원 Mac용 `tether` 도구). 인터넷 없이 설치됩니다 |
 | `tether-<버전>.tar.sha256` | 묶음의 SHA-256 |
 | `tether-<버전>.tar.sha256.sig` | 위 파일에 대한 저희 서명 |
 | `release-key.pub` | 서명 확인용 공개키 |
-| 직원용 설치 파일(`.pkg`) | 직원 Mac에 까는 명령줄 도구 `tether` |
 
 **릴리스 키 지문**입니다. 이 문서로 받은 값과 맞춰 봅니다. 묶음과 같은 경로로 온 값은 믿지 마세요.
 ```
@@ -109,8 +108,10 @@ sudo tether-admin user <이름>          # 90일. 기간을 바꾸려면: sudo t
 - 전달한 뒤 서버의 폴더는 지워도 됩니다. 다시 필요하면 새로 발급합니다.
 
 **직원 Mac 설정**(각자)
+- 설치 파일은 서버의 `/opt/tether/current/clients/tether-<버전>-macos-arm64.pkg`에 있습니다. 묶음 서명으로 함께 검증된 파일이라 인증서 폴더와 같이 전달하면 됩니다.
+- Apple 실리콘 Mac(M1 이후)용입니다.
 ```bash
-sudo installer -pkg <직원용 설치 파일>.pkg -target /
+sudo installer -pkg tether-<버전>-macos-arm64.pkg -target /    # 더블클릭 대신 터미널로(Apple 개발자 서명이 없는 패키지)
 tether setup <받은 폴더>                # "Logged in as <이름>"이 나오면 끝
 ```
 - 직원에게는 [사용 안내](usage.md)의 "직원용" 부분을 보여 주세요.
@@ -166,5 +167,5 @@ sudo tether-admin policy publish ~/policies /mnt/usb/policy-signing.key
 
 ## 이 버전의 제한
 - 로그인은 개인 인증서(`mtls`)만 됩니다. 회사 계정(OIDC) 로그인은 다음 버전에서 지원합니다.
-- 직원용 도구는 macOS용만 있습니다.
+- 직원용 도구는 Apple 실리콘 Mac용만 있습니다. Apple 개발자 인증서로 서명하지 않아 터미널에서 설치합니다(MDM으로 배포해도 됩니다).
 - 에이전트는 `GITHUB_ORG`의 공개 저장소에서만 작업합니다. 비공개 저장소는 GitHub App을 지원한 뒤에 됩니다.

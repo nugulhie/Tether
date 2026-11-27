@@ -19,7 +19,8 @@ reload_crl() {
 
 case ${1:-} in
   user)
-    TETHER_SERVER=https://$(setting TETHER_ADDRESS) pki user "${2:?name}" "${3:-90}" ;;
+    TETHER_SERVER=https://$(setting TETHER_ADDRESS) pki user "${2:?name}" "${3:-90}"
+    for p in "$OPT"/clients/*.pkg; do [ ! -e "$p" ] || echo "  with the employee client: $p (sudo installer -pkg <file> -target /)"; done ;;
   revoke)
     pki revoke "${2:?name}"
     reload_crl

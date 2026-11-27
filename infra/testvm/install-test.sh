@@ -44,6 +44,7 @@ vm ssh 'sudo /opt/tether/current/tether-install confirm-firewall'
 
 step "tether-doctor (again, after the firewall is confirmed)"
 vm ssh 'sudo tether-doctor'
+vm ssh 'ls /opt/tether/current/clients/*.pkg' || { echo "the employee client is not installed with the bundle"; exit 1; }
 
 step "end-to-end checks"
 tar -czf - --exclude __pycache__ infra/staging/50-e2e.py services/sandbox-orchestrator/orchestrator > "$DIR/e2e.tgz"

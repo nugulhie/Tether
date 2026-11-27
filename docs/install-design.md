@@ -16,6 +16,7 @@ tether-1.0.0/
   images/*.tar         docker save: 서비스 5개, 샌드박스 2개, postgres, envoy
   debs/openshell_*.deb OpenShell(인터넷 없이 설치)
   install/             설치 프로그램, compose 파일(이미지는 digest로만 지정), systemd 유닛, nftables 규칙, 정책 예시
+  clients/*.pkg        직원 Mac용 tether 도구(서명할 때 관리자 Mac에서 넣고 MANIFEST에 적는다)
   release-key.pub      검증용 공개키([설치 안내서](install-guide.md)에도 지문을 싣는다)
 ```
 - 검증은 `openssl pkeyutl -verify -rawin`(Ubuntu 24.04 기본 OpenSSL 3)으로 한다. 서명을 검증하지 못하면 아무것도 설치하지 않는다.
@@ -105,7 +106,7 @@ CONTENT_RETENTION_DAYS=90
 | 파일 | 하는 일 |
 |---|---|
 | `build-bundle.sh` | 빌드 서버(x86_64, 인터넷)에서 묶음을 만든다. 이미지 11개, OpenShell .deb(SHA-256 고정), 설치 파일, 서명 전 `MANIFEST.json` |
-| `sign-bundle.sh` | 릴리스 키가 있는 곳(관리자 Mac, `~/.tether-release`)에서 `MANIFEST.json`과 tar의 sha256에 서명한다. 키는 빌드 서버로 가지 않는다 |
+| `sign-bundle.sh` | 릴리스 키가 있는 곳(관리자 Mac, `~/.tether-release`)에서 직원용 `.pkg`를 묶음의 `clients/`에 넣어 `MANIFEST.json`에 적고(`.pkg`는 macOS에서만 만들 수 있다), `MANIFEST.json`과 tar의 sha256에 서명한다. 키는 빌드 서버로 가지 않는다. `tether-install`은 `.pkg`를 `/opt/tether/<버전>/clients/`에 두고, `tether-admin user`가 그 경로를 알려 준다 |
 | `tether-install` | 3절의 10단계. 다시 실행해도 같은 결과가 나오고, 실패하면 되돌리는 방법을 출력한다 |
 | `tether-upgrade` | 5절. 다른 버전이 설치돼 있으면 `tether-install`은 거부하고 이것만 진행한다: `upgrade_from` 확인, 전체 백업, 설치 단계, 실패 시 되돌리기 명령 출력 |
 | `tether-backup`, `tether-restore` | 백업(매일 `tether-backup.timer`), 복구 연습(`--drill`), 되돌리기, 새 서버 복구. [운영 문서](operations.md) |
