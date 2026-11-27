@@ -28,6 +28,20 @@
   - 엔진은 **127.0.0.1에만** 열고, root가 아닌 계정으로 돌립니다.
   - 바깥에 열려 있으면 설치가 멈춥니다.
 
+**로그인 방식 정하기**
+- **회사 계정(`AUTH_MODE=oidc`, 권장):** 직원이 Google Workspace, Microsoft Entra ID, Okta, Keycloak 같은 회사 IdP 계정으로 로그인합니다. 서버가 IdP에 HTTPS로 접속할 수 있어야 합니다(서명 키를 받아 옵니다).
+- **개인 인증서(`AUTH_MODE=mtls`):** IdP가 없거나 서버가 인터넷에 나갈 수 없을 때 씁니다. 사람마다 인증서를 발급해 직접 전달합니다.
+
+**회사 계정을 쓸 경우: IdP에 로그인 앱 등록**(IdP 관리자가 한 번)
+- Tether 명령은 브라우저 없이 코드를 입력하는 **장치 로그인**(RFC 8628)으로 로그인합니다. 이를 지원하는 앱으로 등록합니다.
+- **Google Workspace**
+  1. Google Cloud 콘솔 → API 및 서비스 → OAuth 동의 화면에서 사용자 유형을 **내부**로 합니다(회사 계정만 동의할 수 있게).
+  2. 사용자 인증 정보 → OAuth 클라이언트 ID 만들기 → 애플리케이션 유형 **TV 및 입력이 제한된 기기**.
+  3. 클라이언트 ID와 클라이언트 보안 비밀을 3절의 `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`에 넣습니다. 이 유형의 보안 비밀은 모든 직원 PC에 배포되는 값이라 비밀로 취급하지 않습니다.
+  4. `OIDC_HOSTED_DOMAINS`에 회사 도메인을 꼭 넣습니다. 넣지 않으면 설치가 거부됩니다(빠지면 회사 밖 Google 계정도 로그인할 수 있기 때문입니다).
+  5. Google 토큰에는 그룹이 없으므로 관리자는 `TETHER_ADMIN_USERS`에 이메일로 적습니다.
+- **그 밖의 IdP**(Entra ID, Okta, Keycloak 등): 공개 클라이언트로 등록하고 장치 코드 흐름을 켭니다. ID 토큰에 `email` claim이 들어가게 합니다. 그룹으로 관리자를 정하려면 `groups` claim도 넣습니다. issuer는 회사 테넌트 전용 주소를 씁니다(예: Entra는 `https://login.microsoftonline.com/<테넌트 ID>/v2.0`이고, `common`은 안 됩니다).
+
 **USB 메모리 하나**
 - 정책 서명 개인키를 담습니다. 이 키는 서버에 남지 않고, 정책을 바꿀 때만 꽂습니다.
 - 잃어버리면 정책을 바꿀 수 없으니 사본을 금고에 둡니다.
@@ -59,8 +73,14 @@ sudo nano /etc/tether/tether.conf
 | `RELEASE_KEY_SHA256` | 0절의 지문. 묶음의 공개키가 이 값과 다르면 설치하지 않습니다 |
 | `TETHER_ADDRESS` | 직원이 접속할 이 서버의 IP 주소 |
 | `TETHER_HOSTNAME` | DNS 이름. 없으면 비웁니다 |
-| `AUTH_MODE` | `mtls`(개인 인증서 로그인). 이 버전은 이것만 지원합니다 |
-| `TETHER_ADMIN_USERS` | 관리자 이름(쉼표로 구분). 5절에서 이 이름으로 인증서를 발급합니다 |
+| `AUTH_MODE` | `oidc`(회사 계정) 또는 `mtls`(개인 인증서). 1절 참고 |
+| `OIDC_ISSUER` | oidc: IdP의 issuer 주소(예: `https://accounts.google.com`) |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | oidc: 1절에서 등록한 앱의 값. 보안 비밀이 없는 IdP는 비웁니다 |
+| `OIDC_HOSTED_DOMAINS` | oidc: 로그인을 허용할 Google Workspace 도메인(쉼표로 구분). Google이면 필수 |
+| `OIDC_SCOPE` | oidc: 비우면 기본값. Google이면 설치 프로그램이 알아서 맞춥니다 |
+| `OIDC_GROUPS_CLAIM`, `ADMIN_GROUPS` | oidc: 그룹으로 관리자를 정할 때 그룹 claim 이름(기본 `groups`)과 관리자 그룹 |
+| `DEVICE_CERTIFICATES` | oidc: `on`이면 직원 Mac마다 기기 인증서도 있어야 접속됩니다(기본 `off`) |
+| `TETHER_ADMIN_USERS` | 관리자(쉼표로 구분). oidc는 로그인 이메일, mtls는 인증서 이름(5절에서 이 이름으로 발급) |
 | `SINGLE_ADMIN_APPROVAL` | 관리자가 한 명뿐이면 `1`(자기 작업도 승인할 수 있고, 기록에 남습니다). 아니면 `0` |
 | `GITHUB_ORG` | 에이전트가 작업할 GitHub 조직 |
 | `LOCAL_INFERENCE_PORT` | 자체 모델 엔진의 포트(예: Ollama `11434`). 없으면 비웁니다 |
@@ -98,6 +118,30 @@ sudo tether-doctor          # 실패 0이어야 합니다. 경고는 내용을 �
 ```
 
 ## 5. 관리자와 직원 등록
+직원용 설치 파일은 서버의 `/opt/tether/current/clients/tether-<버전>-macos-arm64.pkg`에 있습니다. 묶음 서명으로 함께 검증된 파일입니다. Apple 실리콘 Mac(M1 이후)용입니다.
+
+### 회사 계정(`AUTH_MODE=oidc`)
+**모두가 쓰는 폴더 만들기**(서버에서, 한 번)
+```bash
+sudo tether-admin client       # /etc/tether/client/ : 서버 주소, 서버 확인용 인증서, 로그인 앱 정보, 설치 파일
+```
+이 폴더에는 개인 정보가 없습니다. 사내 공유 폴더나 MDM으로 모두에게 나눠 줘도 됩니다.
+
+**직원 Mac 설정**(각자)
+```bash
+sudo installer -pkg tether-<버전>-macos-arm64.pkg -target /    # 더블클릭 대신 터미널로(Apple 개발자 서명이 없는 패키지)
+tether setup <받은 폴더>
+#  Open https://www.google.com/device and enter code ABCD-EFGH  -> 브라우저에서 회사 계정으로 승인
+#  Logged in.
+```
+- 로그인은 자동으로 갱신됩니다. IdP가 갱신을 거절하면(계정 정지, 비밀번호 변경 등) `tether login`을 다시 합니다.
+- `DEVICE_CERTIFICATES=on`이면 Mac마다 `sudo tether-admin user <기기 이름>`으로 기기 인증서를 만들어, 그 폴더의 `cert.pem`과 `key.pem`을 공통 폴더에 함께 넣어 전달합니다.
+
+**퇴사, 노트북 분실**
+- IdP에서 계정을 정지합니다. 새 로그인과 로그인 갱신이 막힙니다. 이미 받은 토큰은 만료(보통 1시간)까지 남습니다.
+- 바로 끊으려면 실행 중인 세션도 끝냅니다: 관리자가 `POST /v1/admin/revoke`에 `{"user_id": "<이메일>", "reason": "..."}`를 보냅니다.
+
+### 개인 인증서(`AUTH_MODE=mtls`)
 **인증서 발급**(서버에서, 사람마다 한 번)
 ```bash
 sudo tether-admin user <이름>          # 90일. 기간을 바꾸려면: sudo tether-admin user <이름> 180
@@ -107,9 +151,7 @@ sudo tether-admin user <이름>          # 90일. 기간을 바꾸려면: sudo t
 - 폴더는 그 사람에게 **직접** 전달합니다(USB 또는 대면). 메일이나 메신저로 보내지 마세요. 키가 곧 그 사람의 신원입니다.
 - 전달한 뒤 서버의 폴더는 지워도 됩니다. 다시 필요하면 새로 발급합니다.
 
-**직원 Mac 설정**(각자)
-- 설치 파일은 서버의 `/opt/tether/current/clients/tether-<버전>-macos-arm64.pkg`에 있습니다. 묶음 서명으로 함께 검증된 파일이라 인증서 폴더와 같이 전달하면 됩니다.
-- Apple 실리콘 Mac(M1 이후)용입니다.
+**직원 Mac 설정**(각자, 설치 파일은 인증서 폴더와 같이 전달합니다)
 ```bash
 sudo installer -pkg tether-<버전>-macos-arm64.pkg -target /    # 더블클릭 대신 터미널로(Apple 개발자 서명이 없는 패키지)
 tether setup <받은 폴더>                # "Logged in as <이름>"이 나오면 끝
@@ -166,6 +208,6 @@ sudo tether-admin policy publish ~/policies /mnt/usb/policy-signing.key
 해결되지 않으면 `sudo tether-doctor --json`의 결과와 설치 출력을 보내 주세요.
 
 ## 이 버전의 제한
-- 로그인은 개인 인증서(`mtls`)만 됩니다. 회사 계정(OIDC) 로그인은 다음 버전에서 지원합니다.
+- 회사 계정 로그인은 장치 로그인(RFC 8628)을 지원하는 OIDC IdP가 있어야 합니다. 출고 전 시험은 시험용 IdP로 했고, 실제 Google Workspace와 Entra ID에서의 확인은 고객사 IdP에 앱을 등록한 뒤 합니다.
 - 직원용 도구는 Apple 실리콘 Mac용만 있습니다. Apple 개발자 인증서로 서명하지 않아 터미널에서 설치합니다(MDM으로 배포해도 됩니다).
 - 에이전트는 `GITHUB_ORG`의 공개 저장소에서만 작업합니다. 비공개 저장소는 GitHub App을 지원한 뒤에 됩니다.

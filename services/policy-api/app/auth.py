@@ -17,7 +17,9 @@ Settings are read per call so tests and deployments can change them via environm
 """
 import hashlib
 import ipaddress
+import json
 import os
+import urllib.request
 import re
 import secrets
 import time
@@ -132,20 +134,51 @@ def verify_user_token(token: str) -> tuple[str, tuple[str, ...]]:
         if not token.startswith("dev:") or not user:
             raise HTTPException(401, "dev mode expects a 'dev:<user>[:<groups>]' token")
         return user, tuple(g for g in groups.split(",") if g)
-    issuer, audience, jwks_url = env("OIDC_ISSUER"), env("OIDC_AUDIENCE"), env("OIDC_JWKS_URL")
-    if not (issuer and audience and jwks_url):
+    issuer, audience = env("OIDC_ISSUER"), env("OIDC_AUDIENCE")
+    if not (issuer and audience):
         raise HTTPException(500, "OIDC is not configured")
+    domains = hosted_domains()
+    if issuer.rstrip("/") in GOOGLE_ISSUERS and not domains:
+        # A Google client ID accepts any Google account unless the Workspace domain (hd) is checked.
+        raise HTTPException(500, "OIDC_HOSTED_DOMAINS must be set for Google sign-in")
     try:
-        key = _jwks(jwks_url).get_signing_key_from_jwt(token).key
+        key = _jwks(env("OIDC_JWKS_URL") or jwks_uri(issuer)).get_signing_key_from_jwt(token).key
         claims = jwt.decode(token, key, algorithms=["RS256", "ES256"], audience=audience, issuer=issuer,
                             options={"require": ["exp", "iat", "iss", "aud"]}, leeway=30)
-    except jwt.PyJWTError as e:
+    except (jwt.PyJWTError, OSError, ValueError, KeyError) as e:
         raise HTTPException(401, f"invalid token: {e}", headers={"WWW-Authenticate": "Bearer"})
-    user = claims.get(env("OIDC_USER_CLAIM", "email"))
+    if domains and claims.get("hd") not in domains:
+        raise HTTPException(401, "token is not from an allowed organization (hd)")
+    user_claim = env("OIDC_USER_CLAIM", "email")
+    user = claims.get(user_claim)
     if not isinstance(user, str) or not user:
         raise HTTPException(401, "token has no user claim")
+    if user_claim == "email":
+        # An unverified address is a name anyone can type; IdPs that omit the claim verify addresses themselves.
+        if claims.get("email_verified") in (False, "false"):
+            raise HTTPException(401, "token email is not verified")
+        user = user.lower()
     groups = claims.get(env("OIDC_GROUPS_CLAIM", "groups")) or []
     return user, tuple(g for g in groups if isinstance(g, str)) if isinstance(groups, list) else ()
+
+
+GOOGLE_ISSUERS = {"https://accounts.google.com", "accounts.google.com"}
+
+
+def hosted_domains() -> set[str]:
+    """OIDC_HOSTED_DOMAINS: the Google Workspace domains (hd claim) whose accounts may sign in."""
+    return {d.strip().lower() for d in env("OIDC_HOSTED_DOMAINS").split(",") if d.strip()}
+
+
+@lru_cache(maxsize=4)
+def _discovery(issuer: str) -> dict:
+    with urllib.request.urlopen(issuer.rstrip("/") + "/.well-known/openid-configuration", timeout=10) as r:
+        return json.load(r)
+
+
+def jwks_uri(issuer: str) -> str:
+    """The IdP's signing keys, from its discovery document (OIDC_JWKS_URL overrides)."""
+    return _discovery(issuer)["jwks_uri"]
 
 
 def verified_device(request: Request) -> str | None:
@@ -177,5 +210,9 @@ def service_principal(token: str) -> Principal | None:
 
 
 def is_admin(p: Principal) -> bool:
+    """A person in ADMIN_GROUPS (IdP groups), or named in ADMIN_USERS (certificate names, or with OIDC the
+    sign-in e-mail: Google ID tokens carry no groups)."""
     admins = {g for g in env("ADMIN_GROUPS", "tether-admins").split(",") if g}
-    return p.kind == "user" and bool(admins & set(p.groups))
+    if p.kind != "user":
+        return False
+    return bool(admins & set(p.groups)) or p.user_id.lower() in {u.lower() for u in admin_users()}

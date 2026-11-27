@@ -2,6 +2,8 @@
 # Day-to-day administration of an installed Tether server (run as root):
 #   tether-admin user <name> [days]          certificate folder for a person -> /etc/tether/pki/ca/users/<name>/
 #                                            (hand the folder over privately; they run: tether setup <folder>)
+#   tether-admin client                      AUTH_MODE=oidc: the folder everyone uses -> /etc/tether/client/
+#                                            (server address, CA, sign-in app; nothing personal)
 #   tether-admin revoke <name>               revoke a person's certificate and reload the CRL
 #   tether-admin policy publish <dir> <key>  sign a policy directory with the policy signing key (USB stick) and
 #                                            publish it. The key is read in a container with no network, never copied.
@@ -21,12 +23,30 @@ case ${1:-} in
   user)
     TETHER_SERVER=https://$(setting TETHER_ADDRESS) pki user "${2:?name}" "${3:-90}"
     for p in "$OPT"/clients/*.pkg; do [ ! -e "$p" ] || echo "  with the employee client: $p (sudo installer -pkg <file> -target /)"; done ;;
+  client)
+    # AUTH_MODE=oidc: one folder for everyone (nothing personal in it): the server address, the CA that signed the
+    # server's certificate, and the sign-in app. People sign in with the company IdP: tether setup <folder>.
+    [ "$(setting AUTH_MODE)" = oidc ] || { echo "AUTH_MODE is $(setting AUTH_MODE): give each person a certificate folder (tether-admin user <name>)" >&2; exit 1; }
+    d=$ETC/client; rm -rf "$d"; install -d -m 755 "$d"
+    install -m 644 "$ETC/pki/ca/service-ca.crt" "$d/service-ca.crt"
+    python3 - "$d/tether.json" "https://$(setting TETHER_ADDRESS)" "$(setting OIDC_ISSUER)" "$(setting OIDC_CLIENT_ID)" \
+      "$(setting OIDC_CLIENT_SECRET)" "$(setting OIDC_SCOPE)" <<'PY'
+import json, sys
+path, server, issuer, client_id, secret, scope = sys.argv[1:7]
+cfg = {"server": server, "oidc_issuer": issuer, "oidc_client_id": client_id}
+cfg.update({k: v for k, v in (("oidc_client_secret", secret), ("oidc_scope", scope)) if v})
+open(path, "w").write(json.dumps(cfg, indent=2) + "\n")
+PY
+    chmod 644 "$d/tether.json"
+    for p in "$OPT"/clients/*.pkg; do [ ! -e "$p" ] || cp "$p" "$d/"; done
+    echo "$d: the same folder for everyone (no personal keys). Each person runs: tether setup <folder>, then signs in with $(setting OIDC_ISSUER)"
+    [ "$(setting DEVICE_CERTIFICATES)" != on ] || echo "  DEVICE_CERTIFICATES=on: each Mac also needs a device certificate: tether-admin user <device>, copied into its folder" ;;
   revoke)
     pki revoke "${2:?name}"
     reload_crl
     echo "also end their running sessions: POST /v1/admin/revoke {\"user_id\": \"$2\", \"reason\": \"...\"}" ;;
   policy)
-    [ "${2:-}" = publish ] || { sed -n 2,9p "$0"; exit 2; }
+    [ "${2:-}" = publish ] || { sed -n 2,11p "$0"; exit 2; }
     dir=$(cd "${3:?policy directory}" && pwd); key=$(realpath "${4:?policy signing key file}")
     version=$(setting TETHER_VERSION)
     last=$(docker exec tether-postgres-1 psql -U agent -d tether -Atc 'select coalesce(max(serial), 0) from policy_bundles')
@@ -44,5 +64,5 @@ case ${1:-} in
   compose)
     shift; compose "$@" ;;
   *)
-    sed -n 2,9p "$0"; exit 2 ;;
+    sed -n 2,11p "$0"; exit 2 ;;
 esac

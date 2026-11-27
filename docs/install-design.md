@@ -46,7 +46,7 @@ CONTENT_RETENTION_DAYS=90
 2. **사전 점검:** Ubuntu 24.04, CPU·메모리·디스크, Docker 버전, cgroup v2, Landlock 지원 커널, 포트 443이 비어 있는지, 시간 동기화.
 3. **이미지 적재:** `docker load` 후 digest가 MANIFEST와 같은지 확인한다.
 4. **비밀 생성:** 서비스 토큰과 내용 암호화 키 묶음(`CONTENT_ENCRYPTION_KEYS_FILE`)을 `/etc/tether/secrets`에 mode 600, root 소유로 만든다. 이미 있으면 덮어쓰지 않는다.
-5. **PKI:** 서비스 CA(이름 제약 포함)와 서버 인증서를 `/etc/tether/pki`에 만든다. `AUTH_MODE=mtls`일 때만 직원용 CA도 만든다.
+5. **PKI:** 서비스 CA(이름 제약 포함)와 서버 인증서를 `/etc/tether/pki`에 만든다. 직원용 CA도 만든다(mtls의 개인 인증서, oidc의 선택 기기 인증서).
 6. **정책 서명 키:** 키 쌍을 만든 뒤 공개키만 서버에 남긴다. 개인키는 관리자가 지정한 경로(USB 등)로 내보내고 서버에서 지운다. 개인키를 내보내기 전에는 설치가 끝나지 않는다.
 7. **OpenShell:** 묶음의 .deb를 설치한다. gateway는 시스템 서비스(전용 계정 `tether`, docker 그룹)로 돌리고, interceptor 소켓은 `/run/tether`에 둔다(시범 서버의 사용자 서비스와 linger 방식을 대체한다).
 8. **제어부 기동:** 묶음의 compose 파일로 띄운다(`docker compose -p tether`, 이미지는 digest 고정). 마이그레이션은 기동 전에 따로 실행한다(`MIGRATE_ON_STARTUP=0`, 실행 전 백업).
@@ -116,7 +116,15 @@ CONTENT_RETENTION_DAYS=90
 
 **설계와 달라진 점**
 - **Docker:** 28 이상을 요구한다(OpenShell 요구 사항, 시범 서버 `00-preflight.sh`와 같다).
-- **로그인:** 이번 버전은 `AUTH_MODE=mtls`만 설치한다. OIDC는 A-4다.
+- **로그인(A-4, 2026-11-27):** `AUTH_MODE=oidc`가 기본이다.
+  - 직원은 `tether` 명령의 장치 로그인(RFC 8628)으로 회사 IdP에 로그인하고, ID 토큰을 그대로 API 토큰으로 쓴다.
+  - Policy API는 issuer의 discovery에서 서명 키를 받아 `iss`, `aud`(로그인 앱의 client ID), `exp`, `email_verified`를 확인한다. Google이면 `hd`(Workspace 도메인, `OIDC_HOSTED_DOMAINS`)도 확인한다. 이 값이 없으면 Google 설정을 거부한다(client ID만으로는 세상 모든 Google 계정이 통과한다).
+  - 관리자는 `ADMIN_GROUPS`(그룹 claim) 또는 `TETHER_ADMIN_USERS`(이메일)로 정한다. Google 토큰에는 그룹이 없다.
+  - 기기 인증서는 선택이다(`DEVICE_CERTIFICATES`, 기본 off). off면 tls-front가 인증서를 요구하지 않는다. 제시된 인증서는 그래도 user CA와 CRL로 확인한다.
+  - 직원용 폴더는 하나다(`tether-admin client`: 서버 주소, 서비스 CA, 로그인 앱 정보).
+  - 직원 도구는 IdP에 회사 CA가 아닌 공개 CA(certifi)로 접속하고, 기기 인증서를 IdP에 보내지 않는다.
+  - 시험: `TETHER_TEST_AUTH=oidc bash infra/testvm/install-test.sh ...`(시험용 IdP `infra/testvm/test-idp.py`).
+  - `mtls`는 IdP가 없거나 서버가 인터넷에 나갈 수 없는 곳을 위해 남긴다.
 - **업그레이드:** 2026-11-26 A-2에서 구현했다([운영 문서](operations.md)). 백업은 DB 덤프와 `/etc/tether`에 더해 자격 증명 브로커 저장소와 OpenShell 게이트웨이 상태까지 담고, 비밀은 `keys.tar.gz`로 따로 묶는다.
 - **설치 파일 소유자:** `/opt/tether/<버전>`은 root 소유로 복사한다. 처음 구현은 `cp -a`라서 묶음을 푼 사용자(`ubuntu`)의 소유가 그대로 남아, 그 사용자가 root로 실행되는 스크립트를 고칠 수 있었다(A-2에서 발견해 고침).
 - **이미지 ID:** 빌드 서버의 로컬 ID가 아니라 저장된 tar의 `index.json` digest를 적는다. Docker containerd 저장소에서는 여러 플랫폼용 이미지의 ID가 index digest라서, `--platform linux/amd64`로 저장해 불러오면 ID가 달라진다.
@@ -127,6 +135,7 @@ CONTENT_RETENTION_DAYS=90
 - **정책 서명 키:** 키 쌍은 서버의 tmpfs(`/run`)에서 만들고, 그 키로 첫 정책을 서명한 뒤 개인키를 `POLICY_SIGNING_KEY_EXPORT`로 내보내고 지운다. 내보낸 곳이 서버의 루트 디스크와 같은 장치면 경고한다. `tether-doctor`는 서버 안에서 그 공개키와 짝인 개인키를 찾으면 실패로 본다.
 
 **남은 것**
-- OIDC(A-4), 이미지·묶음 서명 자동화와 SBOM(A-7)
+- 이미지·묶음 서명 자동화와 SBOM(A-7)
+- 실제 IdP(Google Workspace, Entra ID)에서 로그인 확인. VM 시험은 시험용 IdP로 한다
 - 인터넷 없는 상태에서의 설치 확인. 시험 VM은 인터넷이 된다. 묶음에 OpenShell 감독 이미지를 넣었지만, gateway가 그 이미지를 새로 받으려 하지 않는지는 아직 막힌 네트워크에서 확인하지 않았다.
 - 자체 모델이 있는 설치(`LOCAL_INFERENCE_PORT`)는 VM에 GPU가 없어 확인하지 않았다.

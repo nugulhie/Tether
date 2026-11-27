@@ -61,12 +61,13 @@ PM, 아키텍트, 개발자, QA 관점 검토에서 세 가지가 출시를 막�
 ### 단계 A — 외부 고객 한 곳에 설치할 수 있게 (출시를 막는 것)
 1. **설치 프로그램과 설치 묶음**: 사전 점검, 설정, 기동, 자기 점검. 깨끗한 VM에서 엔지니어 없이 하루 안에 끝나는 것이 완료 기준.
    - 2026-11-26 설계 확정: [설치 프로그램 설계](../install-design.md). 서비스 CA는 서버에서 생성하고 정책 서명 키만 분리, Ubuntu 24.04만, 서명된 오프라인 묶음.
-   - 2026-11-26 첫 구현(`infra/installer/`, 설계 8절): 묶음 생성·서명, `tether-install` 10단계, `tether-doctor`, `tether-admin`. 깨끗한 Ubuntu 24.04 VM(`infra/testvm/install-test.sh`)에서 처음부터 설치 7분(설치 프로그램 42초), doctor 실패 0, e2e 32개 통과·실패 0(자체 모델 항목은 VM에 GPU가 없어 건너뜀). 남은 것: OIDC(A-4), 인터넷 없는 설치 확인. 2026-11-27 고객용 [설치 안내서](../install-guide.md)를 썼다. 직원용 `.pkg`(Apple 실리콘)도 묶음의 `clients/`에 넣어 같은 서명으로 검증한다(rc7).
+   - 2026-11-26 첫 구현(`infra/installer/`, 설계 8절): 묶음 생성·서명, `tether-install` 10단계, `tether-doctor`, `tether-admin`. 깨끗한 Ubuntu 24.04 VM(`infra/testvm/install-test.sh`)에서 처음부터 설치 7분(설치 프로그램 42초), doctor 실패 0, e2e 32개 통과·실패 0(자체 모델 항목은 VM에 GPU가 없어 건너뜀). 남은 것: 인터넷 없는 설치 확인. 2026-11-27 고객용 [설치 안내서](../install-guide.md)를 썼다. 직원용 `.pkg`(Apple 실리콘)도 묶음의 `clients/`에 넣어 같은 서명으로 검증한다(rc7).
 2. **업그레이드와 백업·복구**: 자동 백업, 마이그레이션, 복구 연습 절차.
    - 2026-11-26: `tether-upgrade`(`upgrade_from` 확인, 전체 백업 뒤 설치 단계, 실패하면 되돌리기 명령 출력), `tether-backup`(매일 timer, DB·브로커 저장소·설정, 비밀은 `keys.tar.gz`로 분리, 감사 체인 머리 비교), `tether-restore`(`--drill`, 되돌리기, 새 서버 복구). [운영 문서](../operations.md). VM 시험(`infra/testvm/upgrade-test.sh`) 통과: rc5 설치·사용 → rc6 업그레이드(doctor 실패 0, e2e 실패 0) → 복구 연습 → rc5로 되돌리기(업그레이드 전 감사 이벤트 해시 그대로, doctor·e2e 실패 0) → 다시 업그레이드, 15분. 남은 것: 마이그레이션이 있는 업그레이드 실측, 새 서버 복구의 VM 시험, 서버 밖 백업 복사 자동화.
 3. **키 공급자와 키 교체**: 키 ID 저장, MultiFernet 방식 교체, 백업과 키 분리.
    - 2026-11-26: 키 묶음(`CONTENT_ENCRYPTION_KEYS`, 파일 `CONTENT_ENCRYPTION_KEYS_FILE`), 행마다 키 id(마이그레이션 0012), `python -m app.rekey`와 관리자 API. Vault·KMS 직접 연동과 백업에서 키 분리는 남음.
 4. **OIDC를 기본으로**: 설치할 때 IdP 설정, 기기 인증서는 선택.
+   - 2026-11-27: 설치 프로그램 `AUTH_MODE=oidc`(기본). IdP 점검(설치 전 discovery, doctor에서 Policy API 컨테이너가 서명 키에 닿는지), Google `hd` 필수(`OIDC_HOSTED_DOMAINS`), `email_verified`, 이메일이나 그룹으로 관리자 지정, `DEVICE_CERTIFICATES`(기본 off면 tls-front가 인증서를 요구하지 않음), 직원 공통 폴더(`tether-admin client`). 직원 도구는 Google 장치 로그인에 필요한 `client_secret`과 scope를 받고, IdP에는 공개 CA로 접속한다. VM 시험(`TETHER_TEST_AUTH=oidc`, 시험용 IdP): 설치·doctor 실패 0, e2e 실패 0(OIDC 검사 10개: 다른 조직·조직 없는 계정·다른 앱·미확인 이메일·만료 토큰 거부, 이메일 관리자, 인증서 없이 people 리스너 통과 등). mtls 설치도 같은 묶음(rc8)으로 다시 통과. 남은 것: 실제 Google Workspace·Entra ID에서의 로그인 확인(고객사나 우리 IdP에 앱 등록 필요).
 5. **외부 모델 경로 실사용 검증**: `tether claude`/`tether codex`를 샌드박스 이미지, 게이트웨이, 가드레일까지 끝까지 확인.
    - 2026-11-26: 이미지 `infra/sandbox-images/coding-agents`(Claude Code 2.1.332, Codex 0.172.0, 실행 파일은 `/usr/local/libexec/tether`), 실서버 e2e에서 두 에이전트 모두 샌드박스 → 프록시 → 게이트웨이 도달 확인. 정책 밖 모델은 403. 회사 키를 넣은 뒤 실제 응답 확인이 남음.
 6. **CI 릴리스 게이트**: 단위 테스트, 깨끗한 VM 설치, e2e가 모두 통과해야 출고.

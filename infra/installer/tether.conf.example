@@ -10,9 +10,28 @@ RELEASE_KEY_SHA256=
 TETHER_ADDRESS=
 TETHER_HOSTNAME=
 
-# Sign-in. This version supports personal client certificates (mtls); OIDC comes with roadmap item A-4.
-AUTH_MODE=mtls
-# Administrators: certificate names (comma-separated), issued after install with `tether-admin user <name>`.
+# Sign-in.
+#   oidc: people sign in with the company IdP (Google Workspace, Microsoft Entra ID, Okta, Keycloak, ...) from the
+#         `tether` command (device sign-in, RFC 8628). Register a sign-in app at the IdP first (installation guide).
+#   mtls: no IdP: each person gets a personal certificate (`tether-admin user <name>`).
+AUTH_MODE=oidc
+# oidc: the IdP's issuer URL, e.g. https://accounts.google.com or https://login.microsoftonline.com/<tenant id>/v2.0
+OIDC_ISSUER=
+# oidc: the sign-in app's client ID, and its client secret where the IdP gives one to device apps (Google). That
+# secret is not confidential for this kind of app: it ships to every person's machine.
+OIDC_CLIENT_ID=
+OIDC_CLIENT_SECRET=
+# oidc, Google: the Workspace domain(s) whose accounts may sign in (required: otherwise any Google account could).
+OIDC_HOSTED_DOMAINS=
+# oidc: the scopes the device sign-in asks for. Empty = "openid email profile offline_access" (Google: "openid email profile").
+OIDC_SCOPE=
+# oidc: the ID-token claim with the person's groups (empty = groups; Google tokens have none), and the group(s)
+# whose members are administrators.
+OIDC_GROUPS_CLAIM=
+ADMIN_GROUPS=
+# oidc: on = each Mac also needs a device certificate (`tether-admin user <device>`), recorded with every session.
+DEVICE_CERTIFICATES=off
+# Administrators (comma-separated): oidc = sign-in e-mail addresses (and/or ADMIN_GROUPS); mtls = certificate names.
 TETHER_ADMIN_USERS=
 # 1 only where one person administers alone: they may approve their own jobs (recorded as self_approved).
 SINGLE_ADMIN_APPROVAL=0

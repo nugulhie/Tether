@@ -120,6 +120,49 @@ class TestOIDC:
     def test_dev_tokens_rejected(self):
         assert start_session(client, SESSION, USER).status_code == 401
 
+    def test_email_is_the_user_lowercased(self):
+        assert new_session(headers=self.token(email="Lee@Company.com"))["user_id"] == "lee@company.com"
+
+    def test_unverified_email_rejected(self):
+        assert start_session(client, SESSION, self.token(email_verified=False)).status_code == 401
+        assert new_session(headers=self.token(email_verified=True))["user_id"] == "lee@company.com"
+
+    def test_hosted_domain_enforced(self, monkeypatch):
+        monkeypatch.setenv("OIDC_HOSTED_DOMAINS", "company.com, corp.example")
+        assert start_session(client, SESSION, self.token()).status_code == 401              # no hd: a personal account
+        assert start_session(client, SESSION, self.token(hd="other.com")).status_code == 401
+        assert new_session(headers=self.token(hd="corp.example"))["user_id"] == "lee@company.com"
+
+    def test_google_requires_hosted_domains(self, monkeypatch):
+        monkeypatch.setenv("OIDC_ISSUER", "https://accounts.google.com")
+        r = start_session(client, SESSION, self.token(iss="https://accounts.google.com", hd="company.com"))
+        assert r.status_code == 500 and "OIDC_HOSTED_DOMAINS" in r.text
+        monkeypatch.setenv("OIDC_HOSTED_DOMAINS", "company.com")
+        assert new_session(headers=self.token(iss="https://accounts.google.com", hd="company.com"))["user_id"] == "lee@company.com"
+
+    def test_keys_found_through_discovery(self, monkeypatch):
+        monkeypatch.delenv("OIDC_JWKS_URL")
+        seen = []
+        monkeypatch.setattr(auth, "_discovery", lambda issuer: seen.append(issuer) or {"jwks_uri": issuer + "/keys"})
+        assert new_session(headers=self.token())["user_id"] == "lee@company.com"
+        assert seen == ["https://idp.example.com"]
+
+    def test_unreachable_idp_is_401(self, monkeypatch):
+        monkeypatch.delenv("OIDC_JWKS_URL")
+        def down(issuer): raise OSError("connection refused")
+        monkeypatch.setattr(auth, "_discovery", down)
+        assert start_session(client, SESSION, self.token()).status_code == 401
+
+    def test_admin_by_group_or_by_email(self, monkeypatch):
+        monkeypatch.setenv("ADMIN_GROUPS", "tether-admins")
+        monkeypatch.setenv("ADMIN_USERS", "boss@company.com")
+        assert client.get("/v1/audit/events", headers=self.token()).status_code == 403
+        assert client.get("/v1/audit/events", headers=self.token(groups=["tether-admins"])).status_code == 200
+        assert client.get("/v1/audit/events", headers=self.token(email="Boss@company.com")).status_code == 200
+
+    def test_certificate_exchange_unavailable(self):
+        assert client.post("/v1/auth/token").status_code == 404
+
 
 # --- sessions ---------------------------------------------------------------
 

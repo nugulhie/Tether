@@ -4,7 +4,7 @@
 # (image ID) before anything starts. Values come from /etc/tether/compose.env (mode 600, written by tether-install).
 #
 # - Published ports are bound to 127.0.0.1, except tls-front's people listener (TETHER_ADDRESS:443, client
-#   certificate from the user CA required). Postgres is not published.
+#   certificate from the user CA required, or optional with AUTH_MODE=oidc and DEVICE_CERTIFICATES=off). Postgres is not published.
 # - Sandboxes reach the platform at https://host.openshell.internal (host loopback): tls-front 127.0.0.1:443.
 # - The OpenShell gateway runs on the host as the system service tether-openshell-gateway (user "tether");
 #   the interceptor serves it on /run/tether/gateway-interceptor.sock as that user.
@@ -38,10 +38,15 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://agent:${POSTGRES_PASSWORD:?}@postgres:5432/tether
       MIGRATE_ON_STARTUP: "0"
-      AUTH_MODE: mtls
+      AUTH_MODE: ${AUTH_MODE:?}                     # oidc (company IdP) or mtls (personal certificates)
       USER_TOKEN_KEY: ${USER_TOKEN_KEY:?}
       IDENTITY_PROXY_ADDRESSES: 172.30.0.20/32      # tls-front only
-      ADMIN_USERS: ${TETHER_ADMIN_USERS:?}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_AUDIENCE: ${OIDC_CLIENT_ID:-}            # ID tokens are issued to the sign-in app
+      OIDC_HOSTED_DOMAINS: ${OIDC_HOSTED_DOMAINS:-}
+      OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-groups}
+      ADMIN_GROUPS: ${ADMIN_GROUPS:-tether-admins}
+      ADMIN_USERS: ${TETHER_ADMIN_USERS:-}
       SINGLE_ADMIN_APPROVAL: ${SINGLE_ADMIN_APPROVAL:-0}
       CREDENTIAL_BROKER_TOKEN: ${CREDENTIAL_BROKER_TOKEN:?}
       POLICY_PUBLISHER_TOKEN: ${POLICY_PUBLISHER_TOKEN:?}
@@ -120,7 +125,7 @@ services:
       GITHUB_ORG: ${GITHUB_ORG:?}
       LLM_GATEWAY_URL: https://host.openshell.internal
       POLICY_API_PUBLIC_URL: https://host.openshell.internal
-      DEVICE_ID_HEADER: x-tether-client-serial   # set by tls-front from the verified certificate
+      DEVICE_ID_HEADER: ${DEVICE_ID_HEADER-}     # x-tether-client-serial (set by tls-front) when a device certificate is required
       JOB_SCHEDULER: ${JOB_SCHEDULER:-1}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:?}
       LOCAL_AGENT_IMAGE: ${LOCAL_AGENT_IMAGE:?}

@@ -1,5 +1,7 @@
 """tether setup: install the administrator's certificate folder and sign in."""
+import base64
 import json
+import time
 import os
 import stat
 
@@ -98,3 +100,88 @@ def test_managed_macs_refuse_setup(env, tmp_path, pki, monkeypatch):
     monkeypatch.setattr(cli, "MANAGED_OWNER_UID", os.getuid())
     r = invoke("setup", str(folder(pki, tmp_path, {"server": "https://x"})))
     assert r.exit_code != 0 and "managed" in r.output
+
+
+# --- company sign-in (OIDC): the same folder for everyone, device certificate optional ---------------------------
+
+class FakeIdP:
+    """Discovery, device authorization and token endpoints (RFC 8628), approving on the second poll."""
+    issuer = "https://idp.example.com"
+
+    def __init__(self, token=None):
+        self.requests, self.polls = [], 0
+        self.token = token or {"id_token": "h." + base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 3600}).encode()).decode().rstrip("=") + ".s",
+                               "refresh_token": "r1"}
+
+    def __call__(self, request):
+        form = dict(httpx.QueryParams(request.content.decode())) if request.method == "POST" else {}
+        self.requests.append((request.url.path, form))
+        if request.url.path == "/.well-known/openid-configuration":
+            return httpx.Response(200, json={"issuer": self.issuer, "device_authorization_endpoint": self.issuer + "/device",
+                                             "token_endpoint": self.issuer + "/token"})
+        if request.url.path == "/device":
+            return httpx.Response(200, json={"device_code": "dc", "user_code": "ABCD-EFGH", "verification_uri": self.issuer + "/activate",
+                                             "interval": 0, "expires_in": 60})
+        if request.url.path == "/token":
+            self.polls += 1
+            if form.get("grant_type", "").endswith("device_code") and self.polls < 2:
+                return httpx.Response(400, json={"error": "authorization_pending"})
+            return httpx.Response(200, json=self.token)
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def idp(monkeypatch):
+    fake = FakeIdP()
+    monkeypatch.setattr(cli, "idp_http", lambda timeout=10: httpx.Client(transport=httpx.MockTransport(fake)))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    return fake
+
+
+OIDC = {"oidc_issuer": FakeIdP.issuer, "oidc_client_id": "cid.apps.example", "oidc_client_secret": "public-device-secret",
+        "oidc_scope": "openid email profile"}
+
+
+def test_oidc_folder_without_certificate_signs_in_with_the_device_flow(env, tmp_path, pki, idp):
+    d = folder(pki, tmp_path, {"server": "https://10.0.0.5", **OIDC}, without=("cert.pem", "key.pem"))
+    r = invoke("setup", str(d))
+    assert r.exit_code == 0, r.output
+    assert "enter code ABCD-EFGH" in r.output and "Logged in." in r.output
+    cfg = json.loads((env / "config.json").read_text())
+    assert cfg == {"orchestrator": "https://10.0.0.5", "ca_bundle": str(env / "service-ca.crt"), **OIDC}
+    assert not (env / "cert.pem").exists() and not cli.mtls_mode()
+    device = next(f for p, f in idp.requests if p == "/device")
+    assert device == {"client_id": "cid.apps.example", "scope": "openid email profile"}   # Google rejects offline_access
+    polls = [f for p, f in idp.requests if p == "/token"]
+    assert all(f["client_secret"] == "public-device-secret" and f["client_id"] == "cid.apps.example" for f in polls)
+    assert json.loads((env / "token.json").read_text())["refresh_token"] == "r1"
+
+
+def test_oidc_folder_keeps_an_optional_device_certificate(env, tmp_path, pki, idp):
+    d = folder(pki, tmp_path, {"server": "https://10.0.0.5", **OIDC})
+    assert invoke("setup", str(d)).exit_code == 0
+    cfg = json.loads((env / "config.json").read_text())
+    assert cfg["client_cert"] == str(env / "cert.pem") and cfg["oidc_issuer"] == FakeIdP.issuer
+    assert not cli.mtls_mode()   # the certificate names the device; the person signs in with the IdP
+
+
+def test_oidc_folder_with_half_a_certificate_is_refused(env, tmp_path, pki, idp):
+    d = folder(pki, tmp_path, {"server": "https://10.0.0.5", **OIDC}, without=("key.pem",))
+    r = invoke("setup", str(d))
+    assert r.exit_code == 1 and "missing key.pem" in r.output and not (env / "config.json").exists()
+
+
+def test_oidc_refresh_sends_the_client_fields(env, tmp_path, pki, idp):
+    invoke("setup", str(folder(pki, tmp_path, {"server": "https://10.0.0.5", **OIDC}, without=("cert.pem", "key.pem"))))
+    t = json.loads((env / "token.json").read_text()); t["expires_at"] = int(time.time()) - 10
+    (env / "token.json").write_text(json.dumps(t))
+    assert cli.load_token() == idp.token["id_token"]
+    refresh = [f for p, f in idp.requests if p == "/token"][-1]
+    assert refresh == {"grant_type": "refresh_token", "refresh_token": "r1", "client_id": "cid.apps.example",
+                       "client_secret": "public-device-secret"}
+
+
+def test_oidc_without_id_token_is_a_clean_error(env, tmp_path, pki, idp):
+    idp.token = {"access_token": "a"}
+    r = invoke("setup", str(folder(pki, tmp_path, {"server": "https://10.0.0.5", **OIDC}, without=("cert.pem", "key.pem"))))
+    assert r.exit_code == 1 and "no ID token" in r.output

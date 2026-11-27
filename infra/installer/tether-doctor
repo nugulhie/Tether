@@ -215,7 +215,23 @@ def main():
             add("security", "host firewall confirmed", "warn", "rollback pending: from a new ssh session run tether-install confirm-firewall")
     rc, out, _ = run("docker", "inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", "tether-policy-api-1")
     penv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
-    add("security", "sign-in mode", "ok" if penv.get("AUTH_MODE") == "mtls" else "fail", f"AUTH_MODE={penv.get('AUTH_MODE')}")
+    mode = penv.get("AUTH_MODE")
+    add("security", "sign-in mode", "ok" if mode in ("mtls", "oidc") else "fail", f"AUTH_MODE={mode}")
+    if mode == "oidc":
+        issuer = penv.get("OIDC_ISSUER", "")
+        if issuer.rstrip("/") == "https://accounts.google.com" and not penv.get("OIDC_HOSTED_DOMAINS"):
+            add("security", "sign-in limited to the company's Google domain", "fail", "set OIDC_HOSTED_DOMAINS and re-run tether-install")
+        if not issuer.startswith("https://"):
+            add("security", "IdP over HTTPS", "warn", f"{issuer} (OIDC_ALLOW_HTTP=1 is for a test IdP only)")
+        # From where the keys are fetched: the Policy API's container.
+        probe = ("import json,sys,urllib.request as u; d=json.load(u.urlopen(sys.argv[1]+'/.well-known/openid-configuration',timeout=10));"
+                 "k=json.load(u.urlopen(d['jwks_uri'],timeout=10)); print(len(k['keys']))")
+        rc, out, err = run("docker", "exec", "tether-policy-api-1", "python", "-c", probe, issuer.rstrip("/"))
+        add("security", "Policy API reaches the IdP's signing keys", "ok" if rc == 0 and out.strip().isdigit() and int(out) > 0 else "fail",
+            f"{issuer}: {out.strip()} keys" if rc == 0 else (err.strip().splitlines() or ["no answer"])[-1][:160])
+        admins = [a for a in penv.get("ADMIN_USERS", "").split(",") if a]
+        add("security", "administrators named", "ok" if admins or penv.get("ADMIN_GROUPS") else "fail",
+            ", ".join(admins) or f"group {penv.get('ADMIN_GROUPS')}")
     if penv.get("SINGLE_ADMIN_APPROVAL") == "1":
         add("security", "separate approver", "warn", "SINGLE_ADMIN_APPROVAL=1: an administrator may approve their own jobs")
     rc, out, _ = run("ss", "-ltnH")

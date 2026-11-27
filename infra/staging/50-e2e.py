@@ -22,9 +22,11 @@ import json
 import os
 import secrets
 import sys
+import ssl
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -59,9 +61,22 @@ except Exception as e:
 """
 
 
+AUTH_MODE = ENV.get("AUTH_MODE", "mtls")
+# AUTH_MODE=oidc: people's ID tokens come from the test IdP (infra/testvm/test-idp.py), as a person's device sign-in would.
+OIDC_TEST_IDP = os.environ.get("E2E_OIDC_TEST_IDP", "")
+
+
+def idp_token(email, groups=(), **claims):
+    q = urllib.parse.urlencode({"email": email, "groups": ",".join(groups), **{k: str(v) for k, v in claims.items()}})
+    with urllib.request.urlopen(f"{OIDC_TEST_IDP}/issue?{q}", timeout=10) as r:
+        return r.read().decode()
+
+
 def person_token(user, groups=()):
-    """A token as POST /v1/auth/token issues it (AUTH_MODE=mtls), signed with this host's USER_TOKEN_KEY.
-    The certificate exchange itself is exercised from a person's machine (README)."""
+    """A person's bearer token. mtls: as POST /v1/auth/token issues it, signed with this host's USER_TOKEN_KEY (the
+    certificate exchange itself is exercised from a person's machine). oidc: an ID token from the test IdP."""
+    if AUTH_MODE == "oidc":
+        return idp_token(f"{user}@{ENV.get('OIDC_HOSTED_DOMAINS', '').split(',')[0] or 'test.example'}", groups)
     b64 = lambda d: base64.urlsafe_b64encode(json.dumps(d, separators=(",", ":")).encode()).rstrip(b"=")
     now = int(time.time())
     signing = b64({"alg": "HS256", "typ": "JWT"}) + b"." + b64({"iss": "tether-policy-api", "aud": "tether", "sub": user,
@@ -187,7 +202,7 @@ async def main():
                         {"session_id": s["session_id"], "reason": "staging e2e"})
         check("session revoked by an administrator", status == 200 and r["revoked"] == 1, r)
         status, _ = api("GET", "/v1/admin/guardrails/bypass", "dev:e2e-admin:tether-admins")   # read-only probe
-        check("dev tokens are refused (AUTH_MODE=mtls)", status == 401)
+        check(f"dev tokens are refused (AUTH_MODE={AUTH_MODE})", status == 401)
         await gw.delete_sandboxes([name])
         check("sandbox deleted", not await gw.sandbox_exists(name))
         await refused("re-creation after revoke refused", lambda: gw.create_sandbox(name, IMAGE, policy_file, providers, labels), name)
@@ -296,6 +311,43 @@ async def coding_agent_checks():
                 await gw.run("provider", "delete", pname, check=False)
 
 
+def oidc_checks():
+    """AUTH_MODE=oidc: who may sign in, and the people listener without a device certificate."""
+    domain = ENV.get("OIDC_HOSTED_DOMAINS", "").split(",")[0]
+    good = idp_token(f"e2e-oidc@{domain}")
+    status, _ = api("GET", "/v1/agent/jobs", good)
+    check("company ID token accepted", status == 200)
+    for label, claims in [("another organization's account refused (hd)", {"hd": "other.example"}),
+                          ("an account outside any organization refused (no hd)", {"hd": ""}),
+                          ("a token for another app refused (aud)", {"aud": "someone-else"}),
+                          ("an unverified e-mail refused", {"email_verified": "false"}),
+                          ("an expired token refused", {"exp_in": "-600"})]:
+        status, _ = api("GET", "/v1/agent/jobs", idp_token(f"e2e-oidc@{domain}", **claims))
+        check(label, status == 401, status)
+    status, _ = api("POST", "/v1/auth/token", good)
+    check("certificate exchange unavailable (AUTH_MODE=oidc)", status == 404)
+    status, _ = api("GET", "/v1/audit/events?limit=1", good)
+    check("a person who is not an administrator is refused admin APIs", status == 403)
+    admin = next((a for a in ENV.get("TETHER_ADMIN_USERS", "").split(",") if a), "")
+    if admin:
+        status, _ = api("GET", "/v1/audit/events?limit=1", idp_token(admin))
+        check("an administrator named by e-mail (TETHER_ADMIN_USERS) reads the audit log", status == 200)
+    # From a person's machine: the server's address, the service CA, no client certificate (DEVICE_CERTIFICATES=off).
+
+    ctx = ssl.create_default_context(cafile="/etc/tether/pki/ca/service-ca.crt")
+    req = urllib.request.Request(f"https://{ENV['TETHER_ADDRESS']}/v1/agent/jobs", headers={"Authorization": f"Bearer {good}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+            status = r.status
+    except urllib.error.HTTPError as e:
+        status = e.code
+    except Exception as e:  # noqa: BLE001  (a TLS refusal is the failure being checked)
+        status = f"{type(e).__name__}: {e}"
+    check("people listener accepts a company sign-in without a device certificate", status == 200, status)
+
+
+if AUTH_MODE == "oidc":
+    oidc_checks()
 asyncio.run(main())
 job_checks()
 asyncio.run(coding_agent_checks())

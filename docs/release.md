@@ -31,6 +31,8 @@ bash infra/installer/build-bundle.sh X.Y.Z "$(git rev-parse --short HEAD)" ~/tet
 bash infra/installer/sign-bundle.sh soldoc@192.168.1.27 /home/soldoc/tether-dist/tether-X.Y.Z agent-launcher/build/tether-<cli>.pkg
 # VM이 있는 서버에서: "passed"로 끝나고 종료 코드 0이어야 함
 bash infra/testvm/install-test.sh ~/tether-dist X.Y.Z <릴리스 키 지문>
+# 회사 계정 로그인(AUTH_MODE=oidc, 시험용 IdP)으로도 한 번
+TETHER_TEST_AUTH=oidc bash infra/testvm/install-test.sh ~/tether-dist X.Y.Z <릴리스 키 지문>
 # 업그레이드: 직전 출고 버전 W를 설치·사용 → X.Y.Z로 업그레이드 → 백업·복구 연습 → W로 되돌리기 → 다시 업그레이드
 # (X.Y.Z 묶음은 UPGRADE_FROM=W로 만든다. upgrade_from에 적는 버전마다 한 번씩)
 bash infra/testvm/upgrade-test.sh ~/tether-dist W X.Y.Z <릴리스 키 지문>

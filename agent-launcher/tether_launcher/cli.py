@@ -6,7 +6,8 @@ def user_config_path(): return HOME/"config.json"  # written by `tether setup`
 # user cannot point the signed launcher at a different orchestrator.
 MANAGED_CONFIG=Path("/Library/Application Support/Tether/config.json"); MANAGED_OWNER_UID=0
 ENV_KEYS={"orchestrator":"TETHER_ORCHESTRATOR","device_id":"TETHER_DEVICE_ID","oidc_issuer":"TETHER_OIDC_ISSUER",
-          "oidc_client_id":"TETHER_OIDC_CLIENT_ID","client_cert":"TETHER_CLIENT_CERT","client_key":"TETHER_CLIENT_KEY",
+          "oidc_client_id":"TETHER_OIDC_CLIENT_ID","oidc_client_secret":"TETHER_OIDC_CLIENT_SECRET","oidc_scope":"TETHER_OIDC_SCOPE",
+          "client_cert":"TETHER_CLIENT_CERT","client_key":"TETHER_CLIENT_KEY",
           "ca_bundle":"TETHER_CA_BUNDLE","policy_api":"TETHER_POLICY_API","model":"TETHER_MODEL"}
 DEFAULTS={"orchestrator":"http://localhost:8083","device_id":"local-dev"}
 
@@ -55,11 +56,22 @@ def mtls_token():
 
 # --- OIDC login (device authorization grant, RFC 8628) -----------------------
 
+def idp_http(timeout=10):
+    # The IdP is a public service: public CAs (certifi, as httpx bundles them), not the company CA, and no device certificate.
+    return httpx.Client(timeout=timeout)
+
 def oidc_config():
+    """(client fields for every token request, the IdP's discovery document). Google's device clients need their
+    client_secret on token requests; it is not a secret for that client type (it ships to every machine)."""
     issuer=setting("oidc_issuer"); client_id=setting("oidc_client_id")
     if not (issuer and client_id): raise click.ClickException("set TETHER_OIDC_ISSUER and TETHER_OIDC_CLIENT_ID")
-    with http() as c: d=c.get(issuer.rstrip("/")+"/.well-known/openid-configuration").raise_for_status().json()
-    return client_id,d
+    url=issuer.rstrip("/")+"/.well-known/openid-configuration"
+    try:
+        with idp_http() as c: d=c.get(url).raise_for_status().json()
+    except httpx.HTTPError as e: raise click.ClickException(f"cannot reach the sign-in service {url}: {e}")
+    client={"client_id":client_id}
+    if setting("oidc_client_secret"): client["client_secret"]=setting("oidc_client_secret")
+    return client,d
 
 def jwt_exp(token):
     payload=token.split(".")[1]; payload+="="*(-len(payload)%4)
@@ -85,8 +97,8 @@ def load_token():
     t=json.loads(TOKEN_FILE.read_text())
     if t["expires_at"]-60>time.time(): return t["id_token"]
     if not t.get("refresh_token"): raise click.ClickException("login expired: run `tether login`")
-    client_id,d=oidc_config()
-    with http() as c: r=c.post(d["token_endpoint"],data={"grant_type":"refresh_token","refresh_token":t["refresh_token"],"client_id":client_id})
+    client,d=oidc_config()
+    with idp_http() as c: r=c.post(d["token_endpoint"],data={"grant_type":"refresh_token","refresh_token":t["refresh_token"],**client})
     if r.status_code!=200 or "id_token" not in r.json(): raise click.ClickException("login expired: run `tether login`")
     # Keep the old refresh token if the IdP does not rotate it.
     new=r.json(); new.setdefault("refresh_token",t["refresh_token"]); save_token(new); return new["id_token"]
@@ -99,23 +111,34 @@ def login():
     """Sign in with company SSO, or with your client certificate when there is no SSO."""
     if mtls_mode():
         t=mtls_token(); click.echo(f"Logged in as {t['user_id']} (client certificate)."); return
-    client_id,d=oidc_config()
-    with http() as c:
-        a=c.post(d["device_authorization_endpoint"],data={"client_id":client_id,"scope":"openid email profile offline_access"}).raise_for_status().json()
+    client,d=oidc_config()
+    if "device_authorization_endpoint" not in d: raise click.ClickException("the sign-in service does not offer device sign-in (RFC 8628)")
+    # Google rejects offline_access (it returns a refresh token for device clients anyway): the scope is configurable.
+    scope=setting("oidc_scope") or "openid email profile offline_access"
+    with idp_http() as c:
+        a=c.post(d["device_authorization_endpoint"],data={"client_id":client["client_id"],"scope":scope}).raise_for_status().json()
         click.echo(f"Open {a.get('verification_uri_complete') or a['verification_uri']} and enter code {a['user_code']}")
         interval=a.get("interval",5); deadline=time.time()+a.get("expires_in",600)
         while time.time()<deadline:
             time.sleep(interval)
-            r=c.post(d["token_endpoint"],data={"grant_type":"urn:ietf:params:oauth:grant-type:device_code","device_code":a["device_code"],"client_id":client_id})
-            if r.status_code==200: save_token(r.json()); click.echo("Logged in."); return
+            r=c.post(d["token_endpoint"],data={"grant_type":"urn:ietf:params:oauth:grant-type:device_code","device_code":a["device_code"],**client})
+            if r.status_code==200:
+                t=r.json()
+                if "id_token" not in t: raise click.ClickException("the sign-in service returned no ID token (is the scope missing openid?)")
+                save_token(t); click.echo("Logged in."); return
             err=r.json().get("error")
             if err=="slow_down": interval+=5
             elif err!="authorization_pending": raise click.ClickException(f"login failed: {err}")
     raise click.ClickException("login timed out")
 
 # --- setup ----------------------------------------------------------------------
-# The administrator hands over one folder (infra/pki/tether-pki.sh user): cert.pem, key.pem,
-# service-ca.crt and usually tether.json ({"server": ..., "model": ...}).
+# The administrator hands over one folder:
+# - certificate sign-in (tether-admin user): cert.pem, key.pem, service-ca.crt and usually tether.json
+#   ({"server": ..., "model": ...});
+# - company sign-in (tether-admin client, the same folder for everyone): service-ca.crt and tether.json with
+#   oidc_issuer, oidc_client_id (and oidc_client_secret, oidc_scope where the IdP needs them); plus cert.pem and
+#   key.pem when the server also requires a device certificate.
+OIDC_KEYS=("oidc_issuer","oidc_client_id","oidc_client_secret","oidc_scope")
 
 def write_private(path,data:bytes,mode):
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,mode)
@@ -127,26 +150,35 @@ def write_private(path,data:bytes,mode):
 @click.option("--server",help="Server address, e.g. https://192.168.1.27 (default: tether.json in the folder).")
 @click.option("--model",help="Default model for jobs (default: tether.json in the folder).")
 def setup(folder,server,model):
-    """Install the certificate folder your administrator gave you, then sign in."""
+    """Install the folder your administrator gave you, then sign in."""
     if managed_config() is not None: raise click.ClickException("this Mac's settings are managed (MDM); ask your administrator")
-    files={n:folder/n for n in ("cert.pem","key.pem","service-ca.crt")}
+    try: given=json.loads((folder/"tether.json").read_text()) if (folder/"tether.json").is_file() else {}
+    except ValueError: raise click.ClickException(f"{folder}/tether.json is not valid JSON")
+    oidc=bool(given.get("oidc_issuer"))
+    if oidc and not given.get("oidc_client_id"): raise click.ClickException(f"{folder}/tether.json has oidc_issuer but no oidc_client_id")
+    # With company sign-in the certificate is an optional device certificate; without it, it is the identity.
+    files={n:folder/n for n in ("cert.pem","key.pem","service-ca.crt") if not oidc or (folder/n).is_file() or n=="service-ca.crt"}
     missing=[n for n,f in files.items() if not f.is_file()]
+    if oidc and ("cert.pem" in files)!=("key.pem" in files): missing.append("key.pem" if "cert.pem" in files else "cert.pem")
     if missing: raise click.ClickException(f"{folder} is missing {', '.join(missing)}")
-    given=json.loads((folder/"tether.json").read_text()) if (folder/"tether.json").is_file() else {}
     server=(server or given.get("server") or "").rstrip("/"); model=model or given.get("model")
     if not server.startswith("https://"): raise click.ClickException("give --server https://<server address>")
     try:  # the key must belong to the certificate, and the CA must be a certificate
-        ssl.create_default_context(cafile=str(files["service-ca.crt"])).load_cert_chain(str(files["cert.pem"]),str(files["key.pem"]))
+        ctx=ssl.create_default_context(cafile=str(files["service-ca.crt"]))
+        if "cert.pem" in files: ctx.load_cert_chain(str(files["cert.pem"]),str(files["key.pem"]))
     except (ssl.SSLError,OSError) as e: raise click.ClickException(f"the certificate files do not work together: {e}")
     HOME.mkdir(parents=True,exist_ok=True,mode=0o700); os.chmod(HOME,0o700)
     for n,f in files.items(): write_private(HOME/n,f.read_bytes(),0o600)
-    cfg={"orchestrator":server,"client_cert":str(HOME/"cert.pem"),"client_key":str(HOME/"key.pem"),"ca_bundle":str(HOME/"service-ca.crt")}
+    cfg={"orchestrator":server,"ca_bundle":str(HOME/"service-ca.crt")}
+    if "cert.pem" in files: cfg.update(client_cert=str(HOME/"cert.pem"),client_key=str(HOME/"key.pem"))
+    cfg.update({k:given[k] for k in OIDC_KEYS if given.get(k)})
     if model: cfg["model"]=model
     write_private(user_config_path(),json.dumps(cfg,indent=2).encode(),0o600)
     TOKEN_FILE.unlink(missing_ok=True)  # a token from an earlier identity must not outlive it
     overridden=[v for k,v in ENV_KEYS.items() if k in cfg and os.getenv(v)]
     if overridden: click.echo(f"note: {', '.join(overridden)} in your environment override these settings",err=True)
     click.echo(f"Settings saved to {user_config_path()}. The folder {folder} can now be deleted.")
+    if oidc: login.callback(); return
     t=mtls_token(); click.echo(f"Logged in as {t['user_id']} (client certificate).")
 
 # --- agent launch -------------------------------------------------------------
