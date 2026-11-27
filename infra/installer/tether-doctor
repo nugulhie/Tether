@@ -231,12 +231,23 @@ def main():
             f"{export} is still attached: unmount and remove the media (keep it offline)")
 
     # Backup
-    backups = sorted((TETHER_HOME / "backups").glob("*")) if (TETHER_HOME / "backups").exists() else []
+    bdir = TETHER_HOME / "backups"
+    backups = sorted(p for p in bdir.glob("*Z-*") if (p / "backup.json").is_file()) if bdir.exists() else []
     if backups:
-        age = (time.time() - backups[-1].stat().st_mtime) / 86400
+        age = (time.time() - (backups[-1] / "backup.json").stat().st_mtime) / 86400
         add("backup", "recent backup", "ok" if age < 2 else "warn", f"{backups[-1].name}, {age:.1f} days old")
     else:
-        add("backup", "recent backup", "warn", "no backup yet (scheduled backups: roadmap A-2)")
+        add("backup", "recent backup", "warn", "no backup yet (sudo tether-backup; daily: tether-backup.timer)")
+    rc, _, _ = run("systemctl", "is-enabled", "tether-backup.timer")
+    add("backup", "daily backup scheduled", "ok" if rc == 0 else "warn", "tether-backup.timer")
+    drill = bdir / ".last-drill"
+    if drill.is_file():
+        when, name, result = (drill.read_text().split() + ["", "", ""])[:3]
+        age = (time.time() - drill.stat().st_mtime) / 86400
+        add("backup", "restore drill in the last 35 days", "ok" if result == "ok" and age < 35 else "warn",
+            f"{name} on {when}: {result}")
+    else:
+        add("backup", "restore drill in the last 35 days", "warn", "never (sudo tether-restore --drill <backup>)")
 
 
 main()

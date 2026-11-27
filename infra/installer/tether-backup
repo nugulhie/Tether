@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Back up a Tether install (docs/install-design.md, section 5; docs/operations.md). Run as root:
+#   sudo tether-backup                        a scheduled backup (tether-backup.timer runs this daily)
+#   sudo tether-backup --label pre-upgrade    a named backup; named backups are never pruned automatically
+#   sudo tether-backup --keys-out /mnt/usb    write the key archive there instead of next to the data
+# Writes /var/lib/tether/backups/<UTC time>-<version>[-<label>]/ (mode 700):
+#   db.dump        Postgres (pg_dump -Fc): policies, sessions, jobs, the audit log, stored content (encrypted)
+#   broker.db      the credential broker's store (SQLite online backup; its secrets are encrypted)
+#   config.tar.gz  /etc/tether and the OpenShell CLI config without any secret or private key
+#   keys.tar.gz    the secrets: /etc/tether/secrets and compose.env, both CAs, server and gateway private keys,
+#                  the OpenShell gateway state. db.dump and broker.db are useless without it.
+#   backup.json    version, migration head, audit chain head, sha256 and size of each file
+# Copy keys.tar.gz off the server separately from the rest (different medium or vault).
+# Checks before writing anything: the audit chain verifies, and the chain head recorded at the previous backup
+# (or restore) still has the same hash, so history rewritten since then is reported (exit 3, backup still kept).
+# Keeps the newest $KEEP unlabelled backups (default 14). Exit status: 0 ok, 1 failed, 3 audit history changed.
+set -euo pipefail
+umask 077
+TETHER_HOME=/var/lib/tether OPT=/opt/tether
+DEST_ROOT=${TETHER_BACKUP_DIR:-$TETHER_HOME/backups}
+REF=$DEST_ROOT/.chain-reference
+KEEP=${KEEP:-14} label="" keys_out="" dir=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --label) label=${2:?}; shift 2 ;;
+    --keys-out) keys_out=${2:?}; shift 2 ;;
+    --keep) KEEP=${2:?}; shift 2 ;;
+    *) echo "usage: tether-backup [--label NAME] [--keys-out DIR] [--keep N]" >&2; exit 1 ;;
+  esac
+done
+[ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+[[ -z $label || $label =~ ^[a-z0-9][a-z0-9.-]*$ ]] || { echo "--label: lowercase letters, digits, dots, dashes" >&2; exit 1; }
+[[ $KEEP =~ ^[1-9][0-9]*$ ]] || { echo "--keep must be a positive number" >&2; exit 1; }
+[ -z "$keys_out" ] || [ -d "$keys_out" ] || { echo "$keys_out is not a directory (mount the medium?)" >&2; exit 1; }
+fail() { echo "tether-backup: $*" >&2; [ -z "$dir" ] || rm -rf -- "$dir"; exit 1; }
+
+version=$(python3 -c 'import json; print(json.load(open("/opt/tether/current/MANIFEST.json"))["version"])' 2>/dev/null) \
+  || fail "no Tether install found ($OPT/current/MANIFEST.json)"
+for c in tether-postgres-1 tether-policy-api-1; do
+  [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || fail "$c is not running"
+done
+
+# Audit history first: refuse to quietly roll a tampered log into the backup set.
+chain=$(docker exec tether-policy-api-1 python -m app.audit_chain 2>/dev/null | tail -1) || true
+python3 -c 'import json,sys; sys.exit(0 if json.loads(sys.argv[1] or "{}").get("ok") else 1)' "$chain" \
+  || fail "the audit hash chain does not verify: $chain (run tether-doctor)"
+changed=""
+if [ -s "$REF" ]; then
+  read -r ref_id ref_hash < "$REF"
+  now=$(docker exec tether-policy-api-1 python -m app.audit_chain "$ref_id" 2>/dev/null || true)
+  [ "$now" = "$ref_hash" ] || changed="audit event $ref_id changed since the last backup or restore (was $ref_hash, now ${now:-missing})"
+fi
+
+install -d -m 0700 "$DEST_ROOT"
+target=$DEST_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$version${label:+-$label}
+[ ! -e "$target" ] || fail "$target already exists"
+dir=$target
+install -d -m 0700 "$dir"
+work=$(mktemp -d -p /run tether-backup.XXXXXX)   # tmpfs, removed on exit
+trap 'rm -rf -- "$work"' EXIT
+
+docker exec tether-postgres-1 pg_dump -U agent -d tether -Fc > "$dir/db.dump" || fail "pg_dump failed"
+head=$(docker exec tether-postgres-1 psql -U agent -d tether -Atc 'select version_num from alembic_version') || fail "no migration head"
+
+if [ "$(docker inspect -f '{{.State.Running}}' tether-credential-broker-1 2>/dev/null)" = true ]; then
+  docker exec tether-credential-broker-1 python -c \
+    'import sqlite3; s = sqlite3.connect("/data/broker.db"); d = sqlite3.connect("/tmp/broker.backup"); s.backup(d); d.close()' \
+    || fail "cannot snapshot the credential broker store"
+  docker cp -q tether-credential-broker-1:/tmp/broker.backup "$dir/broker.db"
+  docker exec tether-credential-broker-1 rm -f /tmp/broker.backup
+fi
+
+# Files (paths relative to /): everything secret goes to keys.tar.gz, the rest to config.tar.gz. The OpenShell
+# gateway database is copied with SQLite's online backup API rather than read while the gateway writes it.
+python3 - "$dir/config.tar.gz" "$work/keys.tar.gz" <<'PY' || fail "cannot write the file archives"
+import os, re, sqlite3, sys, tarfile, tempfile
+config_out, keys_out = sys.argv[1:3]
+SECRET = re.compile(r"^(etc/tether/(secrets|pki)/|etc/tether/compose\.env$|.*\.key$|"
+                    r"var/lib/tether/\.config/openshell/gateway\.env$|var/lib/tether/\.local/state/openshell/)")
+TOPS = ("etc/tether", "var/lib/tether/.config/openshell", "var/lib/tether/.local/state/openshell")
+dirs, paths = [], []
+for t in TOPS:
+    for d, subdirs, names in os.walk("/" + t):
+        subdirs.sort()
+        dirs.append(os.path.relpath(d, "/"))
+        paths += [os.path.relpath(os.path.join(d, n), "/") for n in sorted(names)
+                  if os.path.isfile(os.path.join(d, n)) and not os.path.islink(os.path.join(d, n))]
+# Directory entries (owner and mode, e.g. /etc/tether/tls root:tether 750) go in the config archive, parents first.
+dirs = ["var/lib/tether", "var/lib/tether/.config", "var/lib/tether/.local", "var/lib/tether/.local/state"] + dirs
+db = "var/lib/tether/.local/state/openshell/gateway/openshell.db"
+with tarfile.open(config_out, "w:gz") as config, tarfile.open(keys_out, "w:gz") as keys:
+    seen = set()
+    for d in dirs:
+        if d not in seen and os.path.isdir("/" + d):
+            seen.add(d)
+            config.add("/" + d, arcname=d, recursive=False)
+    for p in paths:
+        if p.startswith(db):            # the database and its -wal/-shm: replaced by a consistent snapshot below
+            continue
+        (keys if SECRET.match(p) else config).add("/" + p, arcname=p, recursive=False)
+    if os.path.exists("/" + db):
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(keys_out)) as snap:
+            src, dst = sqlite3.connect("/" + db), sqlite3.connect(snap.name)
+            src.backup(dst); dst.close(); src.close()
+            info = keys.gettarinfo(snap.name, arcname=db)
+            st = os.stat("/" + db)
+            info.uid, info.gid, info.mode = st.st_uid, st.st_gid, st.st_mode & 0o7777
+            info.uname = info.gname = ""
+            try:
+                import pwd, grp
+                info.uname, info.gname = pwd.getpwuid(st.st_uid).pw_name, grp.getgrgid(st.st_gid).gr_name
+            except KeyError:
+                pass
+            with open(snap.name, "rb") as f:
+                keys.addfile(info, f)
+PY
+keys=$dir/keys.tar.gz
+[ -z "$keys_out" ] || keys=$keys_out/$(basename "$dir")-keys.tar.gz
+mv "$work/keys.tar.gz" "$keys" 2>/dev/null || { cp "$work/keys.tar.gz" "$keys" && sync; } || fail "cannot write $keys"
+chmod 600 "$dir"/* "$keys"
+
+python3 - "$dir" "$keys" "$version" "$head" "$chain" "$label" <<'PY' || fail "cannot write backup.json"
+import hashlib, json, os, sys
+from datetime import datetime, timezone
+d, keys, version, head, chain, label = sys.argv[1:7]
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+files = {n: {"sha256": sha(os.path.join(d, n)), "bytes": os.path.getsize(os.path.join(d, n))}
+         for n in sorted(os.listdir(d)) if n not in ("backup.json", "keys.tar.gz")}
+manifest = json.load(open("/opt/tether/current/MANIFEST.json"))
+c = json.loads(chain)
+out = {"format": 1, "version": version, "commit": manifest.get("commit"), "label": label or None,
+       "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+       "alembic_head": head, "components": manifest.get("components", {}),
+       "audit": {"events": c.get("events"), "head_id": c.get("head_id"), "head_hash": c.get("head_hash")},
+       "files": files,
+       "keys": {"file": os.path.basename(keys), "sha256": sha(keys), "bytes": os.path.getsize(keys),
+                "stored": "with the backup" if os.path.dirname(keys) == d else "separately"}}
+with open(os.path.join(d, "backup.json"), "w") as f:
+    json.dump(out, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+chmod 600 "$dir/backup.json"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["head_id"], d["head_hash"]) if d.get("head_id") else None' "$chain" > "$REF.new"
+if [ -s "$REF.new" ]; then mv "$REF.new" "$REF"; else rm -f "$REF.new"; fi
+done_dir=$dir; dir=""   # from here on a failure must not remove the finished backup
+
+# Prune: the newest $KEEP unlabelled backups stay; labelled ones (pre-upgrade, pre-restore) stay until removed by hand.
+for b in "$DEST_ROOT"/*Z-*/; do
+  [ -f "$b/backup.json" ] || continue
+  if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("label") is None else 1)' "$b/backup.json"; then
+    echo "${b%/}"
+  fi
+done | sort | head -n -"$KEEP" | while read -r old; do rm -rf -- "$old"; done
+
+events=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("events"))' "$chain")
+echo "backup ok: $done_dir ($(du -sh "$done_dir" | cut -f1); migrations at $head; $events audit events)"
+[ -z "$keys_out" ] || echo "keys: $keys"
+if [ -n "$changed" ]; then echo "ALERT: $changed" >&2; exit 3; fi

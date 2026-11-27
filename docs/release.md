@@ -30,6 +30,9 @@ bash infra/installer/build-bundle.sh X.Y.Z "$(git rev-parse --short HEAD)" ~/tet
 bash infra/installer/sign-bundle.sh soldoc@192.168.1.27 /home/soldoc/tether-dist/tether-X.Y.Z
 # VM이 있는 서버에서: "passed"로 끝나고 종료 코드 0이어야 함
 bash infra/testvm/install-test.sh ~/tether-dist X.Y.Z <릴리스 키 지문>
+# 업그레이드: 직전 출고 버전 W를 설치·사용 → X.Y.Z로 업그레이드 → 백업·복구 연습 → W로 되돌리기 → 다시 업그레이드
+# (X.Y.Z 묶음은 UPGRADE_FROM=W로 만든다. upgrade_from에 적는 버전마다 한 번씩)
+bash infra/testvm/upgrade-test.sh ~/tether-dist W X.Y.Z <릴리스 키 지문>
 ```
 
 ## 4. 버전과 기록
@@ -40,4 +43,4 @@ bash infra/testvm/install-test.sh ~/tether-dist X.Y.Z <릴리스 키 지문>
 ## 아직 기준에 없는 것 (로드맵 A-1, A-7)
 - 깨끗한 VM 설치(3절)의 CI 자동화: 지금은 사람이 기준 서버에서 돌린다(KVM이 있는 자체 러너가 필요하다)
 - 이미지 서명과 SBOM, 서비스 이미지의 베이스 digest 고정과 의존성 고정(지금 `services/*/Dockerfile`은 `python:3.13-slim`과 범위 지정 의존성)
-- 이전 버전 DB에서 새 버전으로의 업그레이드 검사(첫 출고 버전이 생기면 그 DB 덤프로)
+- 마이그레이션이 있는 업그레이드: `upgrade-test.sh`는 있지만 지금까지 버전 사이에 마이그레이션이 없었다(0013). 마이그레이션이 추가되는 첫 버전에서 확인한다

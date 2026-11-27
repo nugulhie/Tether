@@ -2,6 +2,7 @@
 # Install Tether from a signed offline bundle (docs/install-design.md, section 3). Ubuntu 24.04, run as root:
 #   sudo ./install/tether-install /etc/tether/tether.conf     install; re-run any time to repair or renew
 #   sudo ./install/tether-install confirm-firewall             from a NEW ssh session: keep the firewall
+# Another version installed: ./install/tether-upgrade (the same steps after a full backup, see tether-backup).
 # Every step can be re-run and gives the same result. A failing step stops the install and prints how to
 # undo it. Secrets are generated here and stay in /etc/tether/secrets (root, 600); none is printed.
 set -euo pipefail
@@ -12,12 +13,13 @@ ETC=/etc/tether SECRETS=/etc/tether/secrets TLS=/etc/tether/tls PKI=/etc/tether/
 OPT=/opt/tether TETHER_HOME=/var/lib/tether RUN=/run/tether
 OS_STATE=$TETHER_HOME/.local/state/openshell OS_CONFIG=$TETHER_HOME/.config/openshell
 FW_UNIT=tether-firewall FW_ROLLBACK=tether-firewall-rollback
-step=0
+step=0 ROLLBACK=""
 
 say()  { step=$1; shift; printf '\n== [%s/10] %s\n' "$step" "$*"; }
 info() { printf '   %s\n' "$*"; }
 warn() { printf '   [warn] %s\n' "$*"; }
-die()  { printf '\n[FAIL] step %s: %s\n' "$step" "$1" >&2; [ -z "${2:-}" ] || printf '       to undo: %s\n' "$2" >&2; exit 1; }
+# During an upgrade every failure after the pre-upgrade backup prints how to go back to the previous version.
+die()  { printf '\n[FAIL] step %s: %s\n' "$step" "$1" >&2; local undo=${2:-$ROLLBACK}; [ -z "$undo" ] || printf '       to undo: %s\n' "$undo" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
 
 if [ "${1:-}" = confirm-firewall ]; then
@@ -129,6 +131,24 @@ if [ -n "$LOCAL_INFERENCE_PORT" ]; then
   fi
 fi
 [ "$fails" = 0 ] || die "$fails preflight check(s) failed" "nothing was changed"
+
+# Another version installed: only tether-upgrade may replace it, only along a path the bundle declares, and only
+# after a full backup (docs/install-design.md, section 5). Versions are not skipped and never go backwards.
+installed=""
+[ ! -f "$OPT/current/MANIFEST.json" ] || installed=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$OPT/current/MANIFEST.json")
+if [ -n "$installed" ] && [ "$installed" != "$VERSION" ]; then
+  [ "${TETHER_UPGRADE:-}" = 1 ] || die "Tether $installed is installed here; to move to $VERSION use ./install/tether-upgrade" "nothing was changed"
+  python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1])).get("upgrade_from", []) else 1)' "$BUNDLE/MANIFEST.json" "$installed" \
+    || die "this bundle upgrades from $(manifest '", ".join(m.get("upgrade_from", [])) or "no earlier version"'), not from $installed" "nothing was changed"
+  info "upgrade $installed -> $VERSION: full backup first"
+  out=$("$INSTALL_DIR/tether-backup" --label "pre-upgrade-to-$VERSION" 2>&1) \
+    || die "the pre-upgrade backup failed: $out" "nothing was changed (is Tether $installed running? tether-doctor)"
+  backup=${out#backup ok: }; backup=${backup%% (*}
+  info "$out"
+  ROLLBACK="sudo $INSTALL_DIR/tether-restore $backup   (Tether $installed as it was before this upgrade)"
+elif [ "${TETHER_UPGRADE:-}" = 1 ]; then
+  die "${installed:+Tether $installed is already installed; }nothing to upgrade (to repair, run tether-install)" "nothing was changed"
+fi
 
 # --- 3. images ---------------------------------------------------------------------------------------------
 say 3 "Load the images and check them against MANIFEST.json"
@@ -301,11 +321,36 @@ info "openshell $want, gateway registered for user tether"
 say 8 "Control plane (docker compose -p tether)"
 dest=$OPT/$VERSION
 install -d -m 0755 "$OPT" "$dest"
-cp -a "$INSTALL_DIR/." "$dest/"
+# Root-owned and not writable by others: these run as root (the unpacked bundle belongs to whoever unpacked it).
+cp -r --no-preserve=ownership "$INSTALL_DIR/." "$dest/"
 cp "$BUNDLE/MANIFEST.json" "$BUNDLE/MANIFEST.json.sig" "$BUNDLE/release-key.pub" "$dest/"
+chown -R root:root "$dest"; chmod -R go-w "$dest"
 ln -sfn "$dest" "$OPT/current"
-ln -sfn "$OPT/current/tether-doctor" /usr/local/sbin/tether-doctor
-ln -sfn "$OPT/current/tether-admin" /usr/local/sbin/tether-admin
+# Tools link to this version's copy: after a rollback to a version without one, the newer copy keeps working.
+for t in tether-doctor tether-admin tether-backup tether-restore; do ln -sfn "$dest/$t" "/usr/local/sbin/$t"; done
+cat > /etc/systemd/system/tether-backup.service <<EOF
+[Unit]
+Description=Tether backup (database, credential store, configuration, keys)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tether-backup
+EOF
+cat > /etc/systemd/system/tether-backup.timer <<EOF
+[Unit]
+Description=Daily Tether backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable -q --now tether-backup.timer
 if [ -n "$LOCAL_INFERENCE_PORT" ]; then
   sed "s/port_value: 11434/port_value: $LOCAL_INFERENCE_PORT/" "$dest/envoy-inference.yaml" > "$ETC/envoy-inference.yaml"
 fi
@@ -314,7 +359,7 @@ psql() { docker exec tether-postgres-1 psql -U agent -d tether -Atc "$1"; }
 compose up -d --wait postgres >/dev/null 2>&1 || die "Postgres did not become healthy (docker logs tether-postgres-1)"
 if [ "$(psql "select count(*) from information_schema.tables where table_name = 'alembic_version'")" = 1 ]; then
   head=$(psql "select version_num from alembic_version")
-  if [ "$head" != "$(manifest 'm["alembic_head"]')" ]; then
+  if [ "$head" != "$(manifest 'm["alembic_head"]')" ] && [ -z "$ROLLBACK" ]; then   # an upgrade has its full backup
     install -d -m 0700 "$TETHER_HOME/backups"
     b=$TETHER_HOME/backups/pre-migrate-$head-$(date -u +%Y%m%dT%H%M%SZ).sql.gz
     docker exec tether-postgres-1 pg_dump -U agent -d tether | gzip > "$b"; chmod 600 "$b"
@@ -323,7 +368,7 @@ if [ "$(psql "select count(*) from information_schema.tables where table_name = 
 fi
 compose run --rm --no-deps policy-api python -c 'from app.db import migrate; migrate()' 2>&1 | grep -v '^INFO' | sed 's/^/   /' || true
 [ "$(psql "select version_num from alembic_version")" = "$(manifest 'm["alembic_head"]')" ] \
-  || die "database is not at migration $(manifest 'm["alembic_head"]')" "restore the backup in $TETHER_HOME/backups"
+  || die "database is not at migration $(manifest 'm["alembic_head"]')" "${ROLLBACK:-restore the backup in $TETHER_HOME/backups}"
 compose up -d --remove-orphans >/dev/null 2>&1 || { compose ps; die "docker compose up failed"; }
 for u in http://127.0.0.1:8080 http://127.0.0.1:8081 http://127.0.0.1:8082 http://172.30.0.1:8083; do
   for _ in $(seq 60); do curl -fsS "$u/health" >/dev/null 2>&1 && break; sleep 2; done

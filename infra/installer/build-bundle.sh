@@ -2,6 +2,7 @@
 # Build the offline install bundle (docs/install-design.md, section 1) on an x86_64 Docker host with internet,
 # from the repository root:
 #   bash infra/installer/build-bundle.sh <version> [commit] [out-dir]     e.g. 0.1.0 "$(git rev-parse --short HEAD)"
+#   UPGRADE_FROM=0.1.0,0.1.1 bash ...   the installed versions tether-upgrade may move from (each must be tested, docs/release.md)
 # Produces <out-dir>/tether-<version>/ (default out-dir: dist) with an UNSIGNED MANIFEST.json. Sign it where the
 # release key is, with infra/installer/sign-bundle.sh, which also packs tether-<version>.tar.
 set -euo pipefail
@@ -57,12 +58,12 @@ curl -fsSL -o "$dir/debs/$OPENSHELL_DEB" "$OPENSHELL_URL"
 echo "$OPENSHELL_SHA256  $dir/debs/$OPENSHELL_DEB" | sha256sum -c --quiet -
 
 echo "== install files"
-cp infra/installer/{tether-install,tether-doctor,tether-admin,compose.yml,tether-openshell-gateway.service,firewall.nft,policy-default.yaml,tether.conf.example} "$dir/install/"
+cp infra/installer/{tether-install,tether-upgrade,tether-backup,tether-restore,tether-doctor,tether-admin,compose.yml,tether-openshell-gateway.service,firewall.nft,policy-default.yaml,tether.conf.example} "$dir/install/"
 cp infra/pki/tether-pki.sh "$dir/install/"
 cp infra/openshell/gateway.toml "$dir/install/gateway.toml"
 cp infra/staging/envoy-front.yaml "$dir/install/envoy-front.yaml"
 cp infra/staging/out/gpu-network/envoy/envoy.yaml "$dir/install/envoy-inference.yaml"
-chmod 755 "$dir/install/"{tether-install,tether-doctor,tether-admin,tether-pki.sh}
+chmod 755 "$dir/install/"{tether-install,tether-upgrade,tether-backup,tether-restore,tether-doctor,tether-admin,tether-pki.sh}
 # Company provider profiles with the platform hosts as sandboxes see them on a single server (host loopback).
 for p in openshell/profiles/*.yaml; do
   sed -e 's/^\(  - host: \)llm-gateway\.company\.internal$/\1host.openshell.internal/' \
@@ -78,10 +79,10 @@ for m in services/policy-api/app/migrations/versions/[0-9][0-9][0-9][0-9]_*.py; 
 agents=$(sed -nE 's/^ARG (CLAUDE_CODE|CODEX)_VERSION=(.*)$/\1@\2/p' infra/sandbox-images/coding-agents/Dockerfile \
          | tr 'A-Z_' 'a-z-' | tr '\n' ' ')
 [ -n "$head" ] && [ -n "$agents" ] || { echo "cannot read the migration head or agent versions" >&2; exit 1; }
-python3 - "$dir" "$VERSION" "$COMMIT" "$head" "$OPENSHELL_VERSION" "$OPENSHELL_DEB" "$agents" <<'PY'
+python3 - "$dir" "$VERSION" "$COMMIT" "$head" "$OPENSHELL_VERSION" "$OPENSHELL_DEB" "$agents" "${UPGRADE_FROM:-}" <<'PY'
 import hashlib, json, os, subprocess, sys
 from datetime import datetime, timezone
-d, version, commit, head, openshell, deb, agents = sys.argv[1:8]
+d, version, commit, head, openshell, deb, agents, upgrade_from = sys.argv[1:9]
 def sha(p):
     h = hashlib.sha256()
     with open(p, "rb") as f:
@@ -109,7 +110,7 @@ manifest = {
     "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "alembic_head": head,
     "supported_os": "ubuntu-24.04-x86_64",
-    "upgrade_from": [],
+    "upgrade_from": [v.strip() for v in upgrade_from.split(",") if v.strip()],
     "components": {"openshell": openshell, **dict(a.split("@") for a in agents.split()),
                    "envoy": by("envoyproxy/envoy:").split(":")[1], "postgres": by("postgres:").split(":")[1],
                    "registry": by("registry:").split(":")[1]},

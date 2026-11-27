@@ -61,8 +61,9 @@ PM, 아키텍트, 개발자, QA 관점 검토에서 세 가지가 출시를 막�
 ### 단계 A — 외부 고객 한 곳에 설치할 수 있게 (출시를 막는 것)
 1. **설치 프로그램과 설치 묶음**: 사전 점검, 설정, 기동, 자기 점검. 깨끗한 VM에서 엔지니어 없이 하루 안에 끝나는 것이 완료 기준.
    - 2026-11-26 설계 확정: [설치 프로그램 설계](../install-design.md). 서비스 CA는 서버에서 생성하고 정책 서명 키만 분리, Ubuntu 24.04만, 서명된 오프라인 묶음.
-   - 2026-11-26 첫 구현(`infra/installer/`, 설계 8절): 묶음 생성·서명, `tether-install` 10단계, `tether-doctor`, `tether-admin`. 깨끗한 Ubuntu 24.04 VM(`infra/testvm/install-test.sh`)에서 처음부터 설치 7분(설치 프로그램 42초), doctor 실패 0, e2e 32개 통과·실패 0(자체 모델 항목은 VM에 GPU가 없어 건너뜀). 남은 것: OIDC(A-4), 업그레이드(A-2), 설치 안내서, 인터넷 없는 설치 확인.
+   - 2026-11-26 첫 구현(`infra/installer/`, 설계 8절): 묶음 생성·서명, `tether-install` 10단계, `tether-doctor`, `tether-admin`. 깨끗한 Ubuntu 24.04 VM(`infra/testvm/install-test.sh`)에서 처음부터 설치 7분(설치 프로그램 42초), doctor 실패 0, e2e 32개 통과·실패 0(자체 모델 항목은 VM에 GPU가 없어 건너뜀). 남은 것: OIDC(A-4), 설치 안내서, 인터넷 없는 설치 확인.
 2. **업그레이드와 백업·복구**: 자동 백업, 마이그레이션, 복구 연습 절차.
+   - 2026-11-26: `tether-upgrade`(`upgrade_from` 확인, 전체 백업 뒤 설치 단계, 실패하면 되돌리기 명령 출력), `tether-backup`(매일 timer, DB·브로커 저장소·설정, 비밀은 `keys.tar.gz`로 분리, 감사 체인 머리 비교), `tether-restore`(`--drill`, 되돌리기, 새 서버 복구). [운영 문서](../operations.md). VM 시험(`infra/testvm/upgrade-test.sh`) 통과: rc5 설치·사용 → rc6 업그레이드(doctor 실패 0, e2e 실패 0) → 복구 연습 → rc5로 되돌리기(업그레이드 전 감사 이벤트 해시 그대로, doctor·e2e 실패 0) → 다시 업그레이드, 15분. 남은 것: 마이그레이션이 있는 업그레이드 실측, 새 서버 복구의 VM 시험, 서버 밖 백업 복사 자동화.
 3. **키 공급자와 키 교체**: 키 ID 저장, MultiFernet 방식 교체, 백업과 키 분리.
    - 2026-11-26: 키 묶음(`CONTENT_ENCRYPTION_KEYS`, 파일 `CONTENT_ENCRYPTION_KEYS_FILE`), 행마다 키 id(마이그레이션 0012), `python -m app.rekey`와 관리자 API. Vault·KMS 직접 연동과 백업에서 키 분리는 남음.
 4. **OIDC를 기본으로**: 설치할 때 IdP 설정, 기기 인증서는 선택.

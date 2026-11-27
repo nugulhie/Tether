@@ -72,6 +72,8 @@ CONTENT_RETENTION_DAYS=90
 
 실패하면 이전 이미지와 백업으로 되돌리는 명령을 출력한다. 버전은 건너뛰지 않는다. 지원하는 업그레이드 경로는 MANIFEST에 적는다.
 
+구현과 운영 절차(백업 내용, 복구 연습, 되돌리기, 새 서버 복구)는 [운영 문서](operations.md)에 있다.
+
 ## 6. 시범 서버 스크립트와의 관계
 | 지금(`infra/staging/`) | 설치 프로그램 |
 |---|---|
@@ -105,6 +107,8 @@ CONTENT_RETENTION_DAYS=90
 | `build-bundle.sh` | 빌드 서버(x86_64, 인터넷)에서 묶음을 만든다. 이미지 11개, OpenShell .deb(SHA-256 고정), 설치 파일, 서명 전 `MANIFEST.json` |
 | `sign-bundle.sh` | 릴리스 키가 있는 곳(관리자 Mac, `~/.tether-release`)에서 `MANIFEST.json`과 tar의 sha256에 서명한다. 키는 빌드 서버로 가지 않는다 |
 | `tether-install` | 3절의 10단계. 다시 실행해도 같은 결과가 나오고, 실패하면 되돌리는 방법을 출력한다 |
+| `tether-upgrade` | 5절. 다른 버전이 설치돼 있으면 `tether-install`은 거부하고 이것만 진행한다: `upgrade_from` 확인, 전체 백업, 설치 단계, 실패 시 되돌리기 명령 출력 |
+| `tether-backup`, `tether-restore` | 백업(매일 `tether-backup.timer`), 복구 연습(`--drill`), 되돌리기, 새 서버 복구. [운영 문서](operations.md) |
 | `tether-doctor` | 4절 점검. 읽기만 한다. `--json`을 지원하고, 종료 코드는 실패 수다 |
 | `tether-admin` | `user`·`revoke`(인증서와 CRL 다시 읽기), `policy publish <dir> <USB의 키>`(네트워크 없는 컨테이너에서 서명하고 키는 복사하지 않는다), `compose` |
 | `compose.yml`, `tether-openshell-gateway.service`, `firewall.nft`, `policy-default.yaml`, `tether.conf.example` | 설치 대상 파일 |
@@ -112,7 +116,8 @@ CONTENT_RETENTION_DAYS=90
 **설계와 달라진 점**
 - **Docker:** 28 이상을 요구한다(OpenShell 요구 사항, 시범 서버 `00-preflight.sh`와 같다).
 - **로그인:** 이번 버전은 `AUTH_MODE=mtls`만 설치한다. OIDC는 A-4다.
-- **업그레이드:** `tether-upgrade`는 A-2(업그레이드·백업)에서 만든다. 지금 `tether-install`은 마이그레이션 전에 DB를 덤프한다(`/var/lib/tether/backups`).
+- **업그레이드:** 2026-11-26 A-2에서 구현했다([운영 문서](operations.md)). 백업은 DB 덤프와 `/etc/tether`에 더해 자격 증명 브로커 저장소와 OpenShell 게이트웨이 상태까지 담고, 비밀은 `keys.tar.gz`로 따로 묶는다.
+- **설치 파일 소유자:** `/opt/tether/<버전>`은 root 소유로 복사한다. 처음 구현은 `cp -a`라서 묶음을 푼 사용자(`ubuntu`)의 소유가 그대로 남아, 그 사용자가 root로 실행되는 스크립트를 고칠 수 있었다(A-2에서 발견해 고침).
 - **이미지 ID:** 빌드 서버의 로컬 ID가 아니라 저장된 tar의 `index.json` digest를 적는다. Docker containerd 저장소에서는 여러 플랫폼용 이미지의 ID가 index digest라서, `--platform linux/amd64`로 저장해 불러오면 ID가 달라진다.
 - **샌드박스 이미지:** 로컬 저장소 컨테이너 `tether-registry`(127.0.0.1:5000)에 올린다. 거기서 받은 digest로 `SANDBOX_IMAGE`와 `ALLOWED_SANDBOX_IMAGES`를 고정한다. compose 이미지는 버전 태그로 부르고, 기동 전에 그 태그가 MANIFEST의 ID인지 확인한다.
 - **방화벽:** `/etc/nftables.d`가 아니라 `tether-firewall.service`가 `/etc/tether/firewall.nft`를 부팅 때 적용한다. 적용 후 5분 안에 새 SSH 세션에서 `tether-install confirm-firewall`을 하지 않으면 스스로 풀린다.
@@ -121,7 +126,7 @@ CONTENT_RETENTION_DAYS=90
 - **정책 서명 키:** 키 쌍은 서버의 tmpfs(`/run`)에서 만들고, 그 키로 첫 정책을 서명한 뒤 개인키를 `POLICY_SIGNING_KEY_EXPORT`로 내보내고 지운다. 내보낸 곳이 서버의 루트 디스크와 같은 장치면 경고한다. `tether-doctor`는 서버 안에서 그 공개키와 짝인 개인키를 찾으면 실패로 본다.
 
 **남은 것**
-- OIDC(A-4), `tether-upgrade`와 백업·복구(A-2), 이미지·묶음 서명 자동화와 SBOM(A-7)
+- OIDC(A-4), 이미지·묶음 서명 자동화와 SBOM(A-7)
 - 설치 안내서: 릴리스 키 지문, 사전 조건, `tether.conf` 작성, 첫 관리자 인증서 발급
 - 인터넷 없는 상태에서의 설치 확인. 시험 VM은 인터넷이 된다. 묶음에 OpenShell 감독 이미지를 넣었지만, gateway가 그 이미지를 새로 받으려 하지 않는지는 아직 막힌 네트워크에서 확인하지 않았다.
 - 자체 모델이 있는 설치(`LOCAL_INFERENCE_PORT`)는 VM에 GPU가 없어 확인하지 않았다.

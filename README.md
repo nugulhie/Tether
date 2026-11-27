@@ -16,6 +16,7 @@ Laptops (MDM): Claude Code pinned to the LLM gateway
 | [docs/incident-response.md](docs/incident-response.md) | Kill switch, investigation, legal hold, break-glass |
 | [docs/release.md](docs/release.md) | What must pass before a version ships (Korean) |
 | [docs/install-design.md](docs/install-design.md) | Installer and signed offline bundle design (Korean) |
+| [docs/operations.md](docs/operations.md) | Backup, restore drill, upgrade and rollback for an installed server (Korean) |
 | [docs/production-checklist.md](docs/production-checklist.md) | Environment-specific deployment work |
 | [ADR 0001](docs/adr/0001-local-llm-agent-control.md) · [ADR 0002](docs/adr/0002-sellable-self-hosted-product.md) | Local-LLM agent control; product form and roadmap (Korean) |
 | [infra/staging/README.md](infra/staging/README.md) | The reference single-server deployment (scripts 00–90, e2e) |

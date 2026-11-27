@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+# Restore a Tether backup made by tether-backup (docs/operations.md). Run as root:
+#   sudo tether-restore --drill <backup>        check a backup without touching the install: checksums, restore the
+#                                               database into a scratch database, migration head, audit chain, and
+#                                               that the backup's keys open every stored row. Do this monthly.
+#   sudo tether-restore <backup>                put this server back to the backup: config, keys, database, credential
+#                                               store, OpenShell gateway state, and the Tether version it was taken on
+#                                               (/opt/tether/<version> must still be here). Rollback after an upgrade.
+#   New server (disaster recovery), in this order:
+#   sudo ./install/tether-restore --config-only <backup>    /etc/tether and the keys, before installing
+#   sudo ./install/tether-install /etc/tether/tether.conf   the bundle of the backup's version; keeps the restored keys,
+#                                                           re-issues server certificates if the address changed
+#   sudo tether-restore --data-only <backup>                the database and the credential store
+# Options: --keys <file>  the key archive when it was stored separately (tether-backup --keys-out)
+#          --no-safety-backup  do not take a "pre-restore" backup of the current state first
+# Writes over the current state; what it replaces is kept in /var/lib/tether/restore-<time>/ (mode 700).
+set -euo pipefail
+umask 077
+HERE=$(cd "$(dirname "$0")" && pwd)
+ETC=/etc/tether OPT=/opt/tether TETHER_HOME=/var/lib/tether
+OS_STATE=var/lib/tether/.local/state/openshell OS_CONFIG=var/lib/tether/.config/openshell
+mode=full keys="" safety=1 b=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --drill) mode=drill; shift ;;
+    --config-only) mode=config; shift ;;
+    --data-only) mode=data; shift ;;
+    --keys) keys=${2:?}; shift 2 ;;
+    --no-safety-backup) safety=0; shift ;;
+    -*) echo "unknown option $1" >&2; exit 1 ;;
+    *) b=$1; shift ;;
+  esac
+done
+[ -n "$b" ] || { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+b=$(cd "$b" && pwd) || exit 1
+say()  { printf '== %s\n' "$*"; }
+info() { printf '   %s\n' "$*"; }
+die()  { printf '\n[FAIL] %s\n' "$1" >&2; [ -z "${2:-}" ] || printf '       %s\n' "$2" >&2; exit 1; }
+meta() { python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {}, {"m": m}))' "$b/backup.json" "$1"; }
+
+# --- the backup itself -------------------------------------------------------------------------------------
+say "Check $b"
+[ -f "$b/backup.json" ] || die "no backup.json in $b"
+[ -n "$keys" ] || keys=$b/$(meta 'm["keys"]["file"]')
+[ -f "$keys" ] || die "key archive $keys not found" "it was stored separately: pass --keys <file>"
+python3 - "$b" "$keys" <<'PY' || die "the backup does not match backup.json (damaged or altered)"
+import hashlib, json, os, sys
+d, keys = sys.argv[1:3]
+m = json.load(open(os.path.join(d, "backup.json")))
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+bad = [n for n, e in m["files"].items() if not os.path.exists(os.path.join(d, n)) or sha(os.path.join(d, n)) != e["sha256"]]
+if sha(keys) != m["keys"]["sha256"]:
+    bad.append(os.path.basename(keys))
+for n in bad:
+    print("   mismatch or missing:", n)
+sys.exit(1 if bad else 0)
+PY
+version=$(meta 'm["version"]') head=$(meta 'm["alembic_head"]') audit_head=$(meta 'm["audit"]["head_hash"] or ""')
+info "Tether $version, taken $(meta 'm["created"]'), migrations at $head, $(meta 'm["audit"]["events"]') audit events"
+work=$(mktemp -d -p /run tether-restore.XXXXXX)   # tmpfs: the keys are unpacked only here
+drill_db=""
+cleanup() {
+  [ -z "$drill_db" ] || docker exec tether-postgres-1 psql -U agent -d postgres -qc "drop database if exists $drill_db with (force)" >/dev/null 2>&1 || true
+  rm -rf -- "$work"
+}
+trap cleanup EXIT
+tar -xzf "$keys" -C "$work" etc/tether/secrets/secrets.env etc/tether/compose.env || die "the key archive lacks secrets.env or compose.env"
+secret() { grep "^$1=" "$work/etc/tether/secrets/secrets.env" | head -1 | cut -d= -f2-; }
+[ -n "$(secret CONTENT_ENCRYPTION_KEYS)" ] || die "the key archive has no CONTENT_ENCRYPTION_KEYS"
+tar -tzf "$b/config.tar.gz" >/dev/null || die "config.tar.gz does not read"
+
+running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+pg_into() {  # database name: restore db.dump into it (created empty)
+  docker exec tether-postgres-1 psql -U agent -d postgres -q -c 'set client_min_messages = warning' \
+    -c "drop database if exists $1 with (force)" -c "create database $1 owner agent" >/dev/null
+  docker exec -i tether-postgres-1 pg_restore -U agent -d "$1" --no-owner --exit-on-error < "$b/db.dump" \
+    || die "pg_restore into $1 failed"
+}
+# Run a policy-api module against database $1 with the backup's content keys (passed on stdin, not argv).
+api_on() {
+  local db=$1; shift
+  local pw; pw=$(grep '^POSTGRES_PASSWORD=' "$ETC/compose.env" | cut -d= -f2-)
+  printf '%s\n%s\n' "postgresql+psycopg://agent:$pw@postgres:5432/$db" "$(secret CONTENT_ENCRYPTION_KEYS)" \
+    | docker exec -i tether-policy-api-1 sh -c 'read -r DATABASE_URL; read -r CONTENT_ENCRYPTION_KEYS; export DATABASE_URL CONTENT_ENCRYPTION_KEYS; exec "$@"' sh "$@"
+}
+check_db() {  # database name: migration head, audit chain, content keys
+  local got chain k
+  got=$(docker exec tether-postgres-1 psql -U agent -d "$1" -Atc 'select version_num from alembic_version')
+  [ "$got" = "$head" ] || die "restored database is at $got, backup.json says $head"
+  info "[ok] migrations at $got"
+  chain=$(api_on "$1" python -m app.audit_chain 2>/dev/null | tail -1) || true
+  python3 -c 'import json,sys; d=json.loads(sys.argv[1] or "{}"); sys.exit(0 if d.get("ok") and (d.get("head_hash") or "") == sys.argv[2] else 1)' "$chain" "$audit_head" \
+    || die "audit chain in the restored database: $chain (backup.json head ${audit_head:-none})"
+  info "[ok] audit chain verifies, head matches backup.json ($(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["events"])' "$chain") events)"
+  k=$(api_on "$1" python -m app.rekey --dry-run 2>/dev/null | tail -1) || true
+  python3 -c 'import json,sys; d=json.loads(sys.argv[1] or "{}"); sys.exit(0 if "active" in d and not d.get("missing_keys") and not d.get("failed") else 1)' "$k" \
+    || die "the backup's content keys do not open every stored row: $k"
+  info "[ok] the backup's content keys open every stored row"
+}
+check_broker() {
+  [ -f "$b/broker.db" ] || { info "[ok] no credential store in this backup"; return; }
+  cp "$b/broker.db" "$work/broker.db"
+  [ "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("pragma integrity_check").fetchone()[0])' "$work/broker.db")" = ok ] \
+    || die "broker.db fails SQLite's integrity check"
+  info "[ok] credential store passes the integrity check"
+}
+
+# --- drill: nothing on the install changes ----------------------------------------------------------------
+if [ "$mode" = drill ]; then
+  running tether-postgres-1 && running tether-policy-api-1 || die "the drill uses the running Postgres and Policy API containers"
+  say "Restore drill (scratch database)"
+  drill_db=tether_drill_$$
+  pg_into "$drill_db"
+  check_db "$drill_db"
+  check_broker
+  [ -n "$(tar -tzf "$keys" | grep -E '^etc/tether/pki/' | head -1)" ] || die "the key archive has no CA (etc/tether/pki)"
+  info "[ok] key archive holds the secrets and both CAs"
+  install -d -m 0700 "$TETHER_HOME/backups"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $(basename "$b") ok" > "$TETHER_HOME/backups/.last-drill"
+  printf '\ndrill passed: %s can be restored\n' "$(basename "$b")"
+  exit 0
+fi
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+aside=$TETHER_HOME/restore-$stamp
+put_aside() {  # move current paths (relative to /) out of the way, keeping them
+  local p
+  install -d -m 0700 "$aside"
+  for p in "$@"; do
+    [ -e "/$p" ] || continue
+    install -d -m 0700 "$aside/$(dirname "$p")"
+    mv "/$p" "$aside/$p"
+  done
+}
+unpack_files() {  # config and keys archives over /, as the backup had them (owners by name)
+  getent passwd tether >/dev/null || useradd --system --home-dir "$TETHER_HOME" --create-home --shell /usr/sbin/nologin tether
+  ! getent group docker >/dev/null || usermod -aG docker tether
+  install -d -m 0750 -o tether -g tether "$TETHER_HOME"
+  tar -xzpf "$b/config.tar.gz" -C / --same-owner
+  tar -xzpf "$keys" -C / --same-owner
+  chmod 0755 "$ETC"; chmod 0700 "$ETC/secrets" "$ETC/pki"
+  chown -R tether:tether "$TETHER_HOME/.config" "$TETHER_HOME/.local" 2>/dev/null || true
+}
+
+if [ "$mode" = config ]; then
+  say "Restore configuration and keys (new server, before tether-install)"
+  [ ! -e "$OPT/current" ] || die "Tether is already installed here" "use tether-restore <backup> (full) or --data-only"
+  put_aside etc/tether "$OS_CONFIG" "$OS_STATE"
+  unpack_files
+  info "restored /etc/tether and the OpenShell gateway keys; the old files (if any) are in $aside"
+  printf '\nnext: install the Tether %s bundle with /etc/tether/tether.conf (edit TETHER_ADDRESS / ADMIN_NETWORKS first if they\n' "$version"
+  printf 'changed), then: sudo tether-restore --data-only %s\n' "$b"
+  exit 0
+fi
+
+# --- full or data-only: this server's install --------------------------------------------------------------
+[ -f "$OPT/$version/MANIFEST.json" ] || die "Tether $version is not on this server ($OPT/$version)" \
+  "install the $version bundle first (new server: --config-only, tether-install, then --data-only)"
+python3 - "$OPT/$version/MANIFEST.json" <<'PY' || die "images of Tether $version are missing" "re-run the $version bundle's tether-install to load them"
+import json, subprocess, sys
+m = json.load(open(sys.argv[1]))
+bad = [r for r, i in m["images"].items()
+       if subprocess.run(["docker", "image", "inspect", "-f", "{{.Id}}", r], capture_output=True, text=True).stdout.strip() != i["id"]]
+for r in bad:
+    print("   missing or different:", r)
+sys.exit(1 if bad else 0)
+PY
+want_os=$(meta 'm["components"].get("openshell", "")')
+have_os=$(openshell --version 2>/dev/null | awk '{print $NF}' || true)
+if [ -n "$want_os" ] && [ "$have_os" != "$want_os" ]; then
+  info "[warn] OpenShell $have_os is installed, the backup ran $want_os (to match: dpkg -i the .deb from the $version bundle)"
+fi
+if [ "$mode" = data ]; then
+  cur=$(python3 -c 'import json; print(json.load(open("/opt/tether/current/MANIFEST.json"))["version"])')
+  [ "$cur" = "$version" ] || die "this server runs Tether $cur, the backup is $version" "restore data into the same version"
+fi
+
+if [ "$safety" = 1 ] && running tether-postgres-1 && running tether-policy-api-1; then
+  say "Safety backup of the current state"
+  "$HERE/tether-backup" --label pre-restore | sed 's/^/   /' \
+    || die "the safety backup failed" "fix it, or pass --no-safety-backup if the current state is not worth keeping"
+fi
+
+compose() {
+  local profile=""
+  grep -qE '^LOCAL_INFERENCE_PORT=[0-9]+' "$ETC/tether.conf" 2>/dev/null && profile="--profile local-inference"
+  docker compose -p tether --env-file "$ETC/compose.env" -f "$OPT/current/compose.yml" $profile "$@"
+}
+say "Stop Tether"
+systemctl stop tether-openshell-gateway 2>/dev/null || true
+if [ -f "$OPT/current/compose.yml" ] && [ -f "$ETC/compose.env" ]; then compose down >/dev/null 2>&1 || true; fi
+
+if [ "$mode" = full ]; then
+  say "Restore configuration, keys and the OpenShell gateway state; switch to Tether $version"
+  put_aside etc/tether "$OS_CONFIG" "$OS_STATE"
+  unpack_files
+  ln -sfn "$OPT/$version" "$OPT/current"
+  for t in tether-doctor tether-admin tether-backup tether-restore; do
+    [ ! -x "$OPT/$version/$t" ] || ln -sfn "$OPT/$version/$t" "/usr/local/sbin/$t"
+  done
+  info "the replaced files are in $aside"
+fi
+
+say "Restore the database and the credential store"
+compose up --no-start >/dev/null 2>&1 || die "docker compose cannot create the services"
+compose up -d --wait postgres >/dev/null 2>&1 || die "Postgres did not start (docker logs tether-postgres-1)"
+pg_into tether
+info "database restored"
+if [ -f "$b/broker.db" ]; then
+  check_broker
+  docker run --rm --network none -v tether_broker_data:/data -v "$work/broker.db:/b/broker.db:ro" --entrypoint sh "$(grep '^POSTGRES_IMAGE=' "$ETC/compose.env" | cut -d= -f2-)" \
+    -c 'rm -f /data/broker.db-wal /data/broker.db-shm && cp /b/broker.db /data/broker.db' || die "cannot restore the credential store"
+  info "credential store restored"
+fi
+
+say "Start Tether"
+compose up -d --wait >/dev/null 2>&1 || { compose ps; die "docker compose up failed"; }
+check_db tether
+systemctl start tether-openshell-gateway
+for _ in $(seq 30); do
+  runuser -u tether -- env HOME=$TETHER_HOME XDG_CONFIG_HOME=$TETHER_HOME/.config XDG_STATE_HOME=$TETHER_HOME/.local/state \
+    openshell status >/dev/null 2>&1 && break
+  sleep 2
+done
+[ "$mode" != full ] || ! systemctl is-enabled -q tether-firewall 2>/dev/null || systemctl restart tether-firewall
+python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["audit"]; print(a["head_id"], a["head_hash"]) if a.get("head_id") else None' \
+  "$b/backup.json" > "$TETHER_HOME/backups/.chain-reference.new" 2>/dev/null || true
+if [ -s "$TETHER_HOME/backups/.chain-reference.new" ]; then
+  mv "$TETHER_HOME/backups/.chain-reference.new" "$TETHER_HOME/backups/.chain-reference"
+else
+  rm -f "$TETHER_HOME/backups/.chain-reference.new"
+fi
+
+say "Self-check"
+if "$OPT/current/tether-doctor"; then
+  printf '\nrestored %s (Tether %s)\n' "$(basename "$b")" "$version"
+  exit 0
+fi
+die "tether-doctor reported failures (above)"

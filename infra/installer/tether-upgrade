@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Upgrade an installed Tether to this bundle's version (docs/install-design.md, section 5). From the NEW bundle:
+#   sudo ./install/tether-upgrade /etc/tether/tether.conf
+# 1. verify the bundle; refuse unless its MANIFEST lists the installed version under upgrade_from (no skipping,
+#    no downgrade)  2. full backup (tether-backup --label pre-upgrade-to-<version>)  3. the install steps: images,
+#    certificates, migrations, restart, firewall  4. tether-doctor. Any failure after the backup prints the
+#    tether-restore command that puts the previous version and its data back.
+# Data written between the backup and a rollback is lost on rollback: upgrade outside working hours.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+[ "$(id -u)" = 0 ] || { echo "run as root (sudo)" >&2; exit 1; }
+[ -f /opt/tether/current/MANIFEST.json ] || { echo "Tether is not installed here: use ./install/tether-install" >&2; exit 1; }
+TETHER_UPGRADE=1 exec "$here/tether-install" "${1:?usage: tether-upgrade /etc/tether/tether.conf}"
