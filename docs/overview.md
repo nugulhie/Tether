@@ -8,7 +8,7 @@
 > - 사용 안내(직원·관리자): [usage.md](usage.md)
 > - 사고 대응: [incident-response.md](incident-response.md)
 > - 판매용 제품 형태와 로드맵: [adr/0002-sellable-self-hosted-product.md](adr/0002-sellable-self-hosted-product.md)
-> - 출고 기준: [release.md](release.md) · 설치 프로그램 설계: [install-design.md](install-design.md) · 백업·복구·업그레이드: [operations.md](operations.md)
+> - 출고 기준: [release.md](release.md) · 설치 안내서(고객용): [install-guide.md](install-guide.md) · 설치 프로그램 설계: [install-design.md](install-design.md) · 백업·복구·업그레이드: [operations.md](operations.md)
 > - 로컬 LLM(GPU) 에이전트 관제: [adr/0001-local-llm-agent-control.md](adr/0001-local-llm-agent-control.md)
 > - 단일 서버 시범 운영: [infra/staging/README.md](../infra/staging/README.md)
 > - 환경별 배포 할 일: [production-checklist.md](production-checklist.md)

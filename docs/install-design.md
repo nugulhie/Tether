@@ -16,7 +16,7 @@ tether-1.0.0/
   images/*.tar         docker save: 서비스 5개, 샌드박스 2개, postgres, envoy
   debs/openshell_*.deb OpenShell(인터넷 없이 설치)
   install/             설치 프로그램, compose 파일(이미지는 digest로만 지정), systemd 유닛, nftables 규칙, 정책 예시
-  release-key.pub      검증용 공개키(설치 안내서에도 지문을 싣는다)
+  release-key.pub      검증용 공개키([설치 안내서](install-guide.md)에도 지문을 싣는다)
 ```
 - 검증은 `openssl pkeyutl -verify -rawin`(Ubuntu 24.04 기본 OpenSSL 3)으로 한다. 서명을 검증하지 못하면 아무것도 설치하지 않는다.
 - 사전 조건은 고객사가 갖춘다: Docker Engine 28 이상(고객사 미러에서 설치), GPU 서버라면 NVIDIA 드라이버와 Container Toolkit. 설치 프로그램은 이 조건을 점검만 하고, 직접 설치하지 않는다.
@@ -127,6 +127,5 @@ CONTENT_RETENTION_DAYS=90
 
 **남은 것**
 - OIDC(A-4), 이미지·묶음 서명 자동화와 SBOM(A-7)
-- 설치 안내서: 릴리스 키 지문, 사전 조건, `tether.conf` 작성, 첫 관리자 인증서 발급
 - 인터넷 없는 상태에서의 설치 확인. 시험 VM은 인터넷이 된다. 묶음에 OpenShell 감독 이미지를 넣었지만, gateway가 그 이미지를 새로 받으려 하지 않는지는 아직 막힌 네트워크에서 확인하지 않았다.
 - 자체 모델이 있는 설치(`LOCAL_INFERENCE_PORT`)는 VM에 GPU가 없어 확인하지 않았다.

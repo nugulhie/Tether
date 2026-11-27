@@ -40,7 +40,7 @@ sudo tether-restore --drill <백업> --keys /mnt/usb/<백업>-keys.tar.gz   # �
 임시 DB는 끝나면 지웁니다.
 
 ## 3. 업그레이드 `tether-upgrade`
-새 버전 묶음을 받으면 먼저 풀기 전에 서명을 확인합니다(설치 안내서의 명령). 그다음 **새 묶음의** `tether-upgrade`를 실행합니다.
+새 버전 묶음을 받으면 먼저 풀기 전에 서명을 확인합니다([설치 안내서](install-guide.md) 2절). 그다음 **새 묶음의** `tether-upgrade`를 실행합니다.
 ```bash
 sudo ./tether-<새 버전>/install/tether-upgrade /etc/tether/tether.conf
 ```
